@@ -78,8 +78,8 @@ EXCLUDE_DIRS = ("tools/validate",)
 # exception. Keep this list short — every entry is v1 code that 404s on newer builds.
 EXEMPT_FILES = {
     # ts-dependency-cleanup drives the v1 /dependency family, which has no v2
-    # equivalent; its smoke test makes the same calls. Exception documented in that
-    # skill's SKILL.md ("Why raw REST"). Retire with the skill's open item #6.
+    # equivalent; its smoke test makes the same calls. ts-cli.md "Exceptions" (v1
+    # /dependency family) and the skill's "Why raw REST". Retire with its open item #6.
     "tools/smoke-tests/smoke_ts_dependency_cleanup.py",
 }
 

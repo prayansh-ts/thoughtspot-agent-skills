@@ -117,7 +117,7 @@ The draft's "purge finalises what operation 8 deleted" was itself never verified
 by spec lookup (`get-rest-api-reference`) — **never** by calling the endpoint. Tracked as
 BL-411; the skill refuses purge requests until it is answered.
 
-## #9 — `listdependents` cannot reach pinboards — UNVERIFIED (documented values only)
+## #9 — `listdependents` cannot reach pinboards — DEFERRED (documented values only; the skill never sends type=PINBOARD, so this is a docs question — confirm live when cluster A is reachable)
 
 *Corrected 2026-10-28:* this heading used to say "verified from spec". No spec lookup was
 ever done (see the note at the top of this file). The source is the list of `type` values
@@ -538,6 +538,11 @@ delete leg now takes a backup, applies, rolls back and checks the restored objec
 includes a Model and an Answer. That exercises the GUID remap, the case that matters
 most. Record the result here. SKILL.md's confirmation screen tells the user the restore
 is unverified until then.
+
+*Attempted 2026-10-28, not run.* Cluster A did not answer from the machine making the
+fix (`000` on its root), and that machine's Python (3.9) is below ts-cli's 3.10 floor,
+so `ts dependency backup` / `rollback` could not run there either. Run it from a
+machine with network access to cluster A and Python 3.10+.
 
 The clean-fix suggestion in the 2026-10-16 entry (a plan form with a `DELETE_SOURCE`
 intent) is what `source_deleted` implements.
