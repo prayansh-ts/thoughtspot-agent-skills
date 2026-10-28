@@ -848,6 +848,11 @@ are collected in memory first** — files are written only if every export succe
 If ANY export fails, the command aborts non-zero with a clear message and writes
 NOTHING (no partial backup directory).
 
+Add `"source_deleted": true` when the operation deletes the source itself rather than
+modifying it (a cascade delete of a Table, Model or View). Its manifest entry then
+carries `intent: "DELETE"`, so `rollback` re-creates it under a new GUID instead of
+updating it in place at a GUID that no longer exists. Defaults to `false`.
+
 **Output:** the `manifest.json` contents as JSON to stdout (also written to
 `{out_dir}/ts_dep_backup_<timestamp>/manifest.json`, alongside one
 `{type}_{guid}_{name}.json` file per backed-up object). Backup dir path + counts go
@@ -865,7 +870,9 @@ ts dependency rollback --backup-dir /tmp/ts_dep_backup_20260704_120000 --only de
 Restores entries in dependency-safe order (dependents before source). An entry with
 `intent == "DELETE"` is re-imported with `create_new=True` and its `guid:` stripped
 (the object no longer exists at that GUID, so ThoughtSpot assigns a new one); every
-other entry is updated in place at its original GUID.
+other entry is updated in place at its original GUID. Each restored delete's new GUID
+is substituted into the TML of every entry restored after it, so a restored Answer
+binds to the restored Model rather than to the deleted original.
 
 **Options:**
 
@@ -877,8 +884,10 @@ other entry is updated in place at its original GUID.
 
 **Output:** `{"succeeded": [...], "failed": [...], "new_guids": {old_guid: new_guid}}`
 to stdout. `new_guids` lets the caller surface a GUID-remap table for any restored
-delete — other objects that referenced the ORIGINAL guid remain broken and need
-manual reattachment. Per-object progress goes to stderr.
+delete — objects outside the backup that referenced the ORIGINAL guid remain broken
+and need manual reattachment. Per-object progress goes to stderr. **Exits 1 when any
+entry is in `failed`** (the JSON is still printed), so a partial restore never reads as
+success.
 
 #### `ts dependency apply-change`
 

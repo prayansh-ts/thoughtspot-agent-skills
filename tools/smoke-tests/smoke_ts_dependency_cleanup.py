@@ -4,11 +4,12 @@ smoke_ts_dependency_cleanup.py — live smoke test for ts-dependency-cleanup.
 
 The skill drives the v1 `/dependency/*` family directly over HTTP with a
 session-login cookie (there is no `ts dependency` CLI surface for these
-endpoints — see the skill's open item #6), so this test exercises the same
-raw calls the skill makes rather than a CLI.
+endpoints — see the skill's "Why raw REST" section and open item #6), so this
+test exercises the same raw calls the skill makes. Operation 8's backup and
+rollback go through `ts dependency backup` / `rollback`, exactly as in the skill.
 
-  1.  v1 session login              — POST session/login -> cookie jar, then
-      session/info to confirm the cookie is usable.
+  1.  v1 session login              — POST session/login (password on stdin)
+      -> cookie jar, then session/info to confirm the cookie is usable.
   2.  Read-only lookups (ops 2-6)   — NON-destructive, always run. Confirms the
       GET verb, the JSON-array `id` form, and the documented response shape,
       including the two distinct empty forms: `{"<guid>":{}}` (0 dependents)
@@ -19,38 +20,47 @@ raw calls the skill makes rather than a CLI.
   4.  Op 8 preview                  — NON-destructive. `apply_changes=false`
       against --column-guid. Validates the 200 shape (`dependents` + `csv`) and
       reports the cascade size. Asserts open item #19's property: every object
-      the op-2 lookup reports must be in the preview (the preview is the
-      authoritative blast radius; the lookup under-reports). A `400
-      METADATA_ERROR` is recorded as a normal business-rule refusal, not a test
-      failure (open item #18).
-  5.  Op 8 apply                    — DESTRUCTIVE and IRREVERSIBLE. Gated behind
-      --run-delete (default OFF), which must be run BY HAND:
-        * run_smoke_tests.py refuses to pass it, so it cannot fire from a gate;
-        * stdin must be a TTY and the operator must type DELETE, as the skill
-          requires;
+      the op-2 lookup reports must be in the preview (the lookup under-reports).
+      A `400 METADATA_ERROR` is recorded as a normal business-rule refusal, not
+      a test failure (open item #18).
+  5.  Op 8 apply                    — DESTRUCTIVE and IRREVERSIBLE on the server.
+      Gated behind --run-delete (default OFF), which must be run BY HAND:
+        * run_smoke_tests.py refuses to pass it, so it cannot fire from a gate,
+          and argparse abbreviations are off, so `--run-d` cannot sneak past;
+        * --source-guid / --source-type (the column's owning Table or Model)
+          are required, because the backup needs them;
         * the preview cascade must be <= --max-cascade (default 3);
-        * the applied CSV is saved to a durable path, printed, and kept.
-      Then diffs applied vs preview (a preview-vs-apply regression — not #19,
-      which Step 4 covers).
-  6.  Cleanup                       — deletes the cookie jar (a live credential).
+        * `ts dependency backup` must succeed (SKILL.md 8b);
+        * a re-run of the preview must match the backup exactly (SKILL.md 8d);
+        * stdin must be a TTY and the operator must type DELETE.
+      Then it records the applied CSV durably, fails on any object deleted
+      without a backup, and confirms the lookup is now empty.
+  6.  Op 8 rollback                 — --run-rollback (needs --run-delete).
+      `ts dependency rollback` on the step-5 backup. Fails on a non-zero exit or
+      any `failed[]` entry, then exports every restored object and fails if
+      one still names a GUID that was deleted (open item #20: the GUID remap).
+  7.  Cleanup                       — logs the session out and deletes the
+      cookie jar (a live credential).
 
 Purge is deliberately NOT exercised and is not part of the skill: its scope is
 unverified and may be instance-wide over everything soft-deleted (open item #8).
 
-Safety tiers: Steps 1-4 and 6 never modify data and always run. Step 5 is the
-only destructive leg.
+Safety tiers: Steps 1-4 and 7 never modify data and always run. Steps 5 and 6
+are the only writing legs, and both are manual-only.
 
 Usage:
     python tools/smoke-tests/smoke_ts_dependency_cleanup.py \
-        --ts-profile dot133 \
+        --ts-profile <profile> \
         --column-guid <logical-column-guid> \
         [--pinboard-guid <guid>]     # optional: exercises the op-7 500 assertion
-        [--run-delete]               # DESTRUCTIVE opt-in, default OFF, manual only
+        [--run-delete --source-guid <owning-table-or-model-guid> --source-type TABLE|MODEL]
+        [--run-rollback]             # restore the step-5 backup and verify it
         [--max-cascade N]            # refuse --run-delete above N objects (default 3)
 
 Credentials: the profile in ~/.claude/thoughtspot-profiles.json names an env var
 (`password_env`); the secret itself lives in the OS keychain and must already be
-exported into the calling shell. This test never prints it.
+exported into the calling shell. This test never prints it and never puts it on
+a command line.
 """
 from __future__ import annotations
 
@@ -66,8 +76,20 @@ from pathlib import Path
 PROFILES = Path.home() / ".claude" / "thoughtspot-profiles.json"
 GUID_LEN = 36
 DEFAULT_MAX_CASCADE = 3
-# Durable, outside the repo: the applied CSV is the record of an irreversible delete.
+CURL_TIMEOUT = ["--connect-timeout", "15", "--max-time", "120"]
+# Durable, outside the repo: the applied CSV and the backup are the record of an
+# irreversible delete.
 RECORD_DIR = Path.home() / ".ts-dependency-cleanup" / "smoke-deletes"
+
+# Preview dependentType (or LOGICAL_TABLE subtype) -> backup plan type (SKILL.md 8b).
+BACKUP_TYPE = {
+    "PINBOARD_ANSWER_BOOK": "LIVEBOARD",
+    "QUESTION_ANSWER_BOOK": "ANSWER",
+    "WORKSHEET": "MODEL",
+    "SQL_VIEW": "SQL_VIEW",
+    "AGGR_WORKSHEET": "VIEW",
+    "ONE_TO_ONE_LOGICAL": "TABLE",
+}
 
 
 def _fail(msg: str) -> None:
@@ -88,13 +110,15 @@ def _load_profile(name: str) -> dict:
     return {}
 
 
-def _curl(args: list[str], verify_ssl: bool) -> tuple[int, str]:
-    """Run curl, returning (http_status, body). Never echoes credentials."""
-    cmd = ["curl", "-sS", "-w", "\n%{http_code}"]
+def _curl(args: list[str], verify_ssl: bool, stdin: str | None = None,
+          timeout: list[str] = CURL_TIMEOUT) -> tuple[int, str]:
+    """Run curl, returning (http_status, body). Never echoes credentials; a secret
+    goes in through `stdin`, never through `args`."""
+    cmd = ["curl", "-sS", "-w", "\n%{http_code}", *timeout]
     if not verify_ssl:
         cmd.append("-k")
     cmd += args
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, input=stdin)
     if res.returncode != 0:
         return 0, res.stderr.strip()
     out = res.stdout.rsplit("\n", 1)
@@ -104,6 +128,10 @@ def _curl(args: list[str], verify_ssl: bool) -> tuple[int, str]:
     except ValueError:
         status = 0
     return status, body
+
+
+def _ts(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["ts", *args], capture_output=True, text=True, input=stdin)
 
 
 def _ids(objs: list) -> set[str]:
@@ -118,8 +146,63 @@ def _lookup_ids(parsed: dict, guid: str) -> set[str]:
     return out
 
 
+def _backup_type(obj: dict) -> str:
+    t = obj.get("type", "")
+    if t == "LOGICAL_TABLE":
+        t = obj.get("type_subtype") or obj.get("subType") or ""
+    if t not in BACKUP_TYPE:
+        _fail(f"unrecognised dependent type {obj.get('type')}/{t} for {obj.get('id')} — "
+              "SKILL.md 8b says stop; extend BACKUP_TYPE only after checking it")
+    return BACKUP_TYPE[t]
+
+
+def _take_backup(profile: str, source_guid: str, source_type: str, objs: list) -> Path:
+    plan = {
+        "operation": "REMOVE",
+        "source": {"guid": source_guid, "type": source_type, "name": "smoke source"},
+        "source_deleted": False,
+        "delete": [{"guid": o["id"], "type": _backup_type(o), "name": o.get("name") or o["id"]}
+                   for o in objs],
+        "out_dir": str(RECORD_DIR),
+    }
+    RECORD_DIR.mkdir(parents=True, exist_ok=True)
+    res = _ts(["dependency", "backup", "--profile", profile], stdin=json.dumps(plan))
+    if res.returncode != 0:
+        _fail(f"ts dependency backup failed — nothing was deleted: {res.stderr.strip()[-300:]}")
+    manifest = json.loads(res.stdout)
+    if len(manifest["objects"]) != 1 + len(objs):
+        _fail(f"backup holds {len(manifest['objects'])} entries, expected {1 + len(objs)}")
+    return Path(manifest["objects"][0]["backup_file"]).parent
+
+
+def _verify_rollback(profile: str, backup_dir: Path) -> None:
+    res = _ts(["dependency", "rollback", "--backup-dir", str(backup_dir), "--profile", profile])
+    try:
+        result = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        _fail(f"rollback printed no JSON (exit {res.returncode}): {res.stderr.strip()[-300:]}")
+    if res.returncode != 0 or result.get("failed"):
+        _fail(f"rollback exit {res.returncode}, failed: {result.get('failed')}")
+    new_guids = result.get("new_guids") or {}
+    manifest = json.loads((backup_dir / "manifest.json").read_text())
+    deleted = {o["guid"] for o in manifest["objects"] if o["intent"] == "DELETE"}
+    if set(new_guids) != deleted:
+        _fail(f"rollback re-created {len(new_guids)} object(s), backup holds {len(deleted)}")
+    print(f"  PASS  rollback exit 0, {len(new_guids)} object(s) re-created")
+    for old, new in sorted(new_guids.items()):
+        exp = _ts(["tml", "export", new, "--fqn", "--profile", profile])
+        if exp.returncode != 0:
+            _fail(f"restored object {new} (was {old}) cannot be exported")
+        stale = sorted(g for g in deleted if g in exp.stdout)
+        if stale:
+            _fail(f"restored {new} still references deleted GUID(s) {stale} — remap failed")
+    print("  PASS  every restored object exports and names only live GUIDs (#20)")
+
+
 def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | None,
-                   run_delete: bool, max_cascade: int = DEFAULT_MAX_CASCADE) -> None:
+                   run_delete: bool, max_cascade: int = DEFAULT_MAX_CASCADE,
+                   source_guid: str | None = None, source_type: str | None = None,
+                   run_rollback: bool = False) -> None:
     prof = _load_profile(profile_name)
     base = prof["base_url"].rstrip("/")
     verify = bool(prof.get("verify_ssl", True))
@@ -139,18 +222,21 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
     print(f"  verify_ssl:   {verify}")
     print(f"  column guid:  {column_guid}")
     print(f"  delete leg:   {'ENABLED (--run-delete)' if run_delete else 'SKIPPED (opt-in, not set)'}")
+    print(f"  rollback leg: {'ENABLED (--run-rollback)' if run_rollback else 'SKIPPED'}")
 
     jar = Path(tempfile.mkdtemp(prefix="ts_smoke_")) / "cookies.txt"
+    logged_in = False
     try:
         # --- Step 1: login -------------------------------------------------
         print("\nStep 1  v1 session login")
         status, _ = _curl(["-c", str(jar), "-o", "/dev/null", "-X", "POST",
                            f"{v1}/session/login",
                            "--data-urlencode", f"username={prof['username']}",
-                           "--data-urlencode", f"password={secret}",
-                           "--data-urlencode", "rememberme=true"], verify)
+                           "--data-urlencode", "password@-",
+                           "--data-urlencode", "rememberme=false"], verify, stdin=secret)
         if status not in (200, 204):
             _fail(f"login returned {status} (expected 200/204)")
+        logged_in = True
         jar.chmod(0o600)
         status, _ = _curl(["-b", str(jar), "-o", "/dev/null", f"{v1}/session/info"], verify)
         if status != 200:
@@ -206,13 +292,14 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
                         "--data-urlencode", "operation_type=DELETE_OBJECT_CASCADE",
                         "--data-urlencode", "apply_changes=false"]
         status, body = _curl(preview_args, verify)
+        preview_objs: list = []
         preview_ids: set[str] = set()
         if status == 200:
             parsed = json.loads(body)
             if "dependents" not in parsed or "csv" not in parsed:
                 _fail("200 preview missing 'dependents' or 'csv' key")
-            objs = parsed["dependents"].get(column_guid, [])
-            preview_ids = _ids(objs)
+            preview_objs = parsed["dependents"].get(column_guid, [])
+            preview_ids = _ids(preview_objs)
             print(f"  PASS  200, cascade = {len(preview_ids)} object(s), csv present")
             # Open item #19: the lookup under-reports, so the preview must CONTAIN it.
             missing = lookup_ids - preview_ids
@@ -240,7 +327,18 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
             print("  REFUSE  --run-delete needs an interactive terminal for the typed "
                   "DELETE confirmation; nothing was deleted")
             run_delete = False
+        backup_dir: Path | None = None
         if run_delete:
+            backup_dir = _take_backup(profile_name, source_guid, source_type, preview_objs)
+            print(f"  PASS  backup written to {backup_dir}")
+            # SKILL.md 8d: the cascade must not have grown since the backup.
+            status, body = _curl(preview_args, verify)
+            recheck = _ids(json.loads(body)["dependents"].get(column_guid, [])) \
+                if status == 200 else None
+            if recheck != preview_ids:
+                _fail(f"re-check does not match the backup (status {status}); nothing "
+                      f"was deleted. Not backed up: {sorted((recheck or set()) - preview_ids)}")
+            print("  PASS  pre-apply re-check matches the backup")
             print(f"  About to IRREVERSIBLY delete {len(preview_ids)} object(s) plus "
                   f"column {column_guid}:")
             for g in sorted(preview_ids):
@@ -252,11 +350,12 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
             print("  SKIP  delete leg not run; nothing was deleted")
         else:
             apply_args = preview_args[:-1] + ["apply_changes=true"]
-            status, body = _curl(apply_args, verify)
+            status, body = _curl(apply_args, verify,
+                                 timeout=["--connect-timeout", "15", "--max-time", "600"])
             if status != 200:
-                _fail(f"apply returned {status}: {body[:200]}")
+                _fail(f"apply returned {status} — state UNKNOWN, do not re-send; re-run "
+                      f"the preview to see what was deleted. Backup: {backup_dir}. {body[:200]}")
             applied = json.loads(body)
-            RECORD_DIR.mkdir(parents=True, exist_ok=True)
             record = RECORD_DIR / f"{datetime.now():%Y%m%d_%H%M%S}_{column_guid}.csv"
             record.write_text(applied.get("csv", ""))
             print(f"  RECORD  applied CSV kept at {record}")
@@ -265,48 +364,68 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
             print(f"  PASS  200, deleted {len(applied_ids)} object(s)")
             for o in sorted(objs, key=lambda x: (x.get("type", ""), x.get("name") or "")):
                 print(f"          {o.get('type'):22} {o.get('name')}  {o.get('id')}")
-            extra = applied_ids - preview_ids
-            if extra:
-                print(f"  WARN  {len(extra)} object(s) deleted that the preview did not "
-                      f"list — preview-vs-apply regression:")
-                for g in sorted(extra):
-                    print(f"          {g}")
+            unbacked = applied_ids - preview_ids
+            if unbacked:
+                _fail(f"{len(unbacked)} object(s) deleted WITHOUT a backup: {sorted(unbacked)}")
             status, body = _curl(["-b", str(jar), "-G", f"{v1}/dependency/logicalcolumn",
                                   "--data-urlencode", f"id={id_arg}"], verify)
             if json.loads(body).get(column_guid) not in ({}, None):
                 _fail("post-delete lookup still reports dependents")
             print("  PASS  post-delete lookup confirms the column is gone")
 
+        # --- Step 6: rollback (opt-in, needs step 5) -----------------------
+        print("\nStep 6  ts dependency rollback of the step-5 backup")
+        if run_rollback and run_delete and backup_dir is not None:
+            _verify_rollback(profile_name, backup_dir)
+        else:
+            print("  SKIP  rollback leg not run")
+
         print("\nSmoke test PASSED")
     finally:
-        # --- Step 6: cleanup ----------------------------------------------
+        # --- Step 7: cleanup ----------------------------------------------
+        if logged_in and jar.exists():
+            _curl(["-b", str(jar), "-o", "/dev/null", "-X", "POST", f"{v1}/session/logout"],
+                  verify)
         if jar.exists():
             jar.unlink()
         try:
             jar.parent.rmdir()
         except OSError:
             pass
-        print("Step 6  cookie jar deleted")
+        print("Step 7  session logged out, cookie jar deleted")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
+    # allow_abbrev=False: `--run-d` must not resolve to --run-delete, because the
+    # runner's refusal matches the full flag name (PR #666 review).
+    ap = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ts-profile", required=True)
     ap.add_argument("--column-guid", required=True,
                     help="a LOGICAL_COLUMN guid (36 chars)")
     ap.add_argument("--pinboard-guid", help="optional: exercises the op-7 500 assertion")
     ap.add_argument("--run-delete", action="store_true",
-                    help="DESTRUCTIVE: actually apply the cascade delete (manual runs "
-                         "only; needs a TTY and a typed DELETE)")
+                    help="DESTRUCTIVE: back up, then actually apply the cascade delete "
+                         "(manual runs only; needs a TTY and a typed DELETE)")
+    ap.add_argument("--source-guid", help="with --run-delete: the Table or Model that owns "
+                                          "the column (the backup's source)")
+    ap.add_argument("--source-type", choices=("TABLE", "MODEL"),
+                    help="with --run-delete: the type of --source-guid")
+    ap.add_argument("--run-rollback", action="store_true",
+                    help="with --run-delete: restore the backup and verify the restore")
     ap.add_argument("--max-cascade", type=int, default=DEFAULT_MAX_CASCADE,
                     help=f"refuse --run-delete when the preview lists more than this "
                          f"many objects (default {DEFAULT_MAX_CASCADE})")
     args = ap.parse_args()
     if len(args.column_guid) != GUID_LEN:
         _fail(f"--column-guid must be {GUID_LEN} chars, got {len(args.column_guid)}")
+    if args.run_delete and not (args.source_guid and args.source_type):
+        _fail("--run-delete needs --source-guid and --source-type: the backup cannot be "
+              "taken without the column's owning object")
+    if args.run_rollback and not args.run_delete:
+        _fail("--run-rollback restores the --run-delete backup; pass both")
     run_smoke_test(args.ts_profile, args.column_guid, args.pinboard_guid, args.run_delete,
-                   args.max_cascade)
+                   args.max_cascade, args.source_guid, args.source_type, args.run_rollback)
 
 
 if __name__ == "__main__":

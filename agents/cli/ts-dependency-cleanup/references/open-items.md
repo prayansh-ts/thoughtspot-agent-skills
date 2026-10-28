@@ -1,8 +1,9 @@
 # Open Items — ts-dependency-cleanup
 
-Items #1, #2 and #4 were probed live against `https://172.32.51.133:8443` on 2026-09-01
-and are VERIFIED below. The rest remain UNVERIFIED — they need an authenticated call,
-which is blocked on the auth decision in #4.
+Probed live on one internal test cluster (**cluster A**) from 2026-09-01. Read each
+item's **last** entry for its current status — several were re-probed and resolved after
+their first entry was written. A second internal cluster (**cluster B**) appears in the
+early history only; it was unreachable throughout.
 
 Per `.claude/rules/api-research.md`, each item should be checked against
 `mcp__SpotterCode__get-rest-api-reference` before live probing. The MCP was not
@@ -77,7 +78,17 @@ SKILL.md but not `curl`, so this passes the gate on a technicality rather than o
 
 The sanctioned path (`.claude/rules/ts-cli.md`, "When a skill needs an API call ts-cli
 doesn't have yet"): verify via MCP → probe → add the command → replace the inline call.
-Blocked behind #1 — do not build CLI commands for endpoints that 404.
+
+**Update 2026-10-28 (PR #666 review, B6).** #1 is VERIFIED, so "blocked behind #1" no
+longer holds, and the review was right to say so. What blocks the migration now is
+**auth**: the endpoints were verified only with a v1 `session/login` cookie (#4), and
+`ts`'s client speaks v2 bearer tokens. **Next step:** probe one read endpoint (operation
+3) with a bearer token from `ts auth`. If it is accepted, add `ts dependency lookup` /
+`ts dependency cascade-delete`, enforcing in code the single-id rule, the pre-apply
+re-check and profile-driven TLS. Until then, raw REST is a **documented exception**
+(SKILL.md "Why raw REST"), not a technicality. The v1 validator's blind spot (a base path
+with no trailing `/` passed `check_no_v1_endpoints.py`) is closed. The smoke test is
+now its one named exemption, so a new v1 call anywhere else fails the gate.
 
 ## #7 — The purge guard is session-scoped — DEFERRED with #8 (operation 9 cut from 1.0.0)
 
@@ -106,9 +117,11 @@ The draft's "purge finalises what operation 8 deleted" was itself never verified
 by spec lookup (`get-rest-api-reference`) — **never** by calling the endpoint. Tracked as
 BL-411; the skill refuses purge requests until it is answered.
 
-## #9 — `listdependents` cannot reach pinboards — VERIFIED FROM SPEC (needs live confirm)
+## #9 — `listdependents` cannot reach pinboards — UNVERIFIED (documented values only)
 
-The valid `type` values given are PHYSICAL_COLUMN, PHYSICAL_TABLE, LOGICAL_COLUMN,
+*Corrected 2026-10-28:* this heading used to say "verified from spec". No spec lookup was
+ever done (see the note at the top of this file). The source is the list of `type` values
+in the request this skill was built from. The valid `type` values given are PHYSICAL_COLUMN, PHYSICAL_TABLE, LOGICAL_COLUMN,
 LOGICAL_TABLE, LOGICAL_RELATIONSHIP — no PINBOARD. So operation 7's dedicated
 `/dependency/pinboard` endpoint is the only route to pinboard dependents. SKILL.md
 documents this asymmetry. Confirm on a live call that `type=PINBOARD` is in fact
@@ -117,7 +130,7 @@ rejected rather than merely undocumented.
 
 ---
 
-# Live probe — 172.32.51.133:8443 — 2026-09-01
+# Live probe — cluster A — 2026-09-01
 
 Unauthenticated `POST`, `curl -k` (self-signed cert), dummy GUID
 `00000000-0000-0000-0000-000000000000`.
@@ -149,9 +162,8 @@ Unauthenticated `POST`, `curl -k` (self-signed cert), dummy GUID
 4. **#3 (encoding) is still blocked** — a 401 is returned before the body is parsed, so
    the form-vs-JSON question cannot be settled until a call authenticates.
 
-**Not the same cluster as the configured profile.** `~/.claude/thoughtspot-profiles.json`
-holds one profile, `tsadmin` → `https://172.32.57.40:8443`, password auth. That is a
-different host from `172.32.51.133`. No credential for `.133` is currently configured.
+**Not the same cluster as the configured profile.** The only profile configured at the
+time pointed at cluster B. No profile for cluster A existed yet (#10).
 
 
 ---
@@ -159,39 +171,23 @@ different host from `172.32.51.133`. No credential for `.133` is currently confi
 ## Decision — auth mechanism (2026-09-01)
 
 **v1 session login with a cookie jar**, chosen by the user over v2 bearer. `session/login`
-is live on `.133` (400 on empty params, not 404). Credentials follow the repo convention:
+is live on cluster A (400 on empty params, not 404). Credentials follow the repo convention:
 profile in `~/.claude/thoughtspot-profiles.json` supplies `base_url` / `username` /
 `password_env`; the secret lives in the keychain and is exported into the shell. SKILL.md
 Step 1 implements this; the no-auth design is withdrawn.
 
-## #10 — No profile exists for 172.32.51.133 — OPEN — BLOCKS TESTING
+## #10 — No profile exists for cluster A — SUPERSEDED (resolved below)
 
-The only configured profile, `tsadmin`, points at `https://172.32.57.40:8443`, which is
-**down** — TLS handshake fails (`SSL_ERROR_SYSCALL`), root returns `000`. `.133` returns
-200 and is the only reachable cluster.
-
-An attempt to reuse the `.57.40` credential against `.133` was **blocked by the Claude
-Code permission classifier** (sending a stored credential to a host it was not stored
-for). That block is correct and was not worked around — whether the two clusters share
-an account is the user's call.
-
-To unblock testing, the user creates a profile for `.133`:
-
-```bash
-ts profiles add --platform thoughtspot --name "dot133" --auth-type password \
-  --field base_url=https://172.32.51.133:8443 \
-  --field username=<username> \
-  --field verify_ssl=false
-```
-
-then stores the password via the printed `keychain_store_commands` and exports
-`THOUGHTSPOT_PASSWORD_DOT133`. No credential value passes through the conversation.
+Cluster B, the only configured profile's host, was down (TLS handshake failed). Cluster A
+was reachable but had no profile, so testing was blocked until the user created one in
+their own terminal with `ts profiles add`. No credential value passed through the
+conversation.
 
 ---
 
-# Full endpoint probe — 172.32.51.133:8443 — 2026-09-01
+# Full endpoint probe — cluster A — 2026-09-01
 
-Authenticated with the `dot133` profile (v1 `session/login` → cookie jar; login `204`,
+Authenticated with a cluster A profile (v1 `session/login` → cookie jar; login `204`,
 `session/info` `200`). Test objects: worksheet `554eb014` (TPCH Model), logical table
 `9a527010` (has one dependent), pinboard `a1cd9526` (Performance Tracking Pinboard).
 
@@ -232,7 +228,7 @@ Two distinct empty forms, easy to conflate:
 - `{}` — GUID is **not of that endpoint's type** (e.g. a logical GUID sent to
   `physicalcolumn`). Returns 200, no error.
 
-Cross-checked: `ts metadata dependents 554eb014 --profile dot133` (v2 API) also returns
+Cross-checked: `ts metadata dependents 554eb014 --profile <cluster-A-profile>` (v2 API) also returns
 `[]`, so the empty v1 results are correct, not a silent failure. A scan of all 134
 logical tables found exactly one with dependents — this cluster is simply sparse.
 
@@ -266,12 +262,11 @@ Either these are newer than this build, or they live under a different route. Re
 via `get-rest-api-reference` when the SpotterCode MCP is authorized. **#8 (purge scope)
 stays open regardless** — it must be answered before operation 9 runs anywhere.
 
-## #10 — Profile for 172.32.51.133 — RESOLVED 2026-09-01
+## #10 — Profile for cluster A — RESOLVED 2026-09-01
 
-Profile `dot133` created (`username=tsadmin`, `verify_ssl=false`,
-`password_env=THOUGHTSPOT_PASSWORD_DOT133`). The credential was copied keychain-to-keychain
-from `thoughtspot-tsadmin` at the user's explicit instruction, value never displayed.
-Note `.57.40` (the original `tsadmin` profile's host) is **down** — TLS handshake fails.
+The user created a password-auth profile for cluster A with `verify_ssl=false`
+(self-signed certificate). The credential lives in the OS keychain under the repo
+convention; its value was never displayed.
 
 ---
 
@@ -306,7 +301,7 @@ for a `ONE_TO_ONE_LOGICAL` table, which exposes `physicalTableGUID` (1),
 Note `metadata/detail/<guid>` (singular, path-param) is **404**; the working form is
 `metadata/details` (plural) with `type` and a JSON-array `id` query parameter.
 
-## #14 — Dependent data on this cluster is sparse — CONTEXT
+## #14 — Dependent data on this cluster is sparse — VERIFIED 2026-09-01 (context, not a defect)
 
 Of 134 logical tables, exactly **one** (`9a527010`) has dependents. 60 sampled logical
 columns had none; the one column that did (`bb89847b`) was found by walking that table's
@@ -366,7 +361,7 @@ Resolve via `get-rest-api-reference` once the SpotterCode MCP is authorized.
 
 # Ops 8 and 9 FOUND — 2026-09-03 (third pass)
 
-## #12 — CLOSED. The endpoints were never absent; the prefix was wrong.
+## #12 — The endpoints were never absent; the prefix was wrong — RESOLVED 2026-09-03
 
 `/dependency/delete-with-dependents` and `/dependency/purge` are served from
 **`/callosum/v1/dependency/`** — *without* the `tspublic/v1` segment that operations 1–7
@@ -384,7 +379,7 @@ endpoint name, after two passes of sweeping *endpoint names* against a fixed pre
 an endpoint is documented but 404s, vary the mount point, not just the spelling. A 404
 is evidence about a *path*, never about a *capability*.
 
-## #16 — CLOSED. Encoding is form-encoded, and two parameters were undocumented.
+## #16 — Encoding is form-encoded, and two parameters were undocumented — RESOLVED 2026-09-03
 
 `POST` + `application/x-www-form-urlencoded`, as inferred. But the spec this skill was
 built from listed only `id` and `apply_changes`. Two more are **required**:
@@ -406,8 +401,10 @@ and `operationtype` all still return `INVALID_OPERATION_TYPE`.
  "csv": "sourceColumnGUID,sourceColumnName,dependentGUID,dependentName,dependentType,dependentSubType,childGUID,childName,childType,author,lastModified,views,orgName\n"}
 ```
 
-The `csv` field is a complete impact export. Since this skill takes no TML backup, saving
-that CSV before applying is the only record of what was removed — SKILL.md 8a instructs it.
+The `csv` field is a complete impact export. SKILL.md 8a saves it as the **record** of
+what is removed. *(Superseded 2026-10-16: this entry said the CSV was the only record
+because the skill took no TML backup. Operation 8 now takes a mandatory
+`ts dependency backup` before applying — SKILL.md 8b.)*
 
 ## #18 — Business-rule refusals are column-specific — VERIFIED 2026-09-03
 
@@ -440,7 +437,7 @@ altogether — see the 2026-10-16 entry.)
 
 ## #19 — Lookups under-report cascade scope by 3x — VERIFIED 2026-09-07
 
-Live on 172.32.51.133. Deleting `LOGICAL_COLUMN` `cbeafa3a-7c10-4033-8062-bd44c2d2245c`
+Live on cluster A. Deleting `LOGICAL_COLUMN` `cbeafa3a-7c10-4033-8062-bd44c2d2245c`
 (`SUBCATEGORY` on `DIM_PRODUCT`):
 
 | Source | Objects reported |
@@ -517,3 +514,46 @@ verified. SKILL.md 8b says so and gives the manual `ts tml import` fallback. Ver
 a disposable table before relying on it; the clean fix is a `ts dependency backup` plan
 form with no `source` (or a `DELETE_SOURCE` intent).
 
+
+---
+
+# PR #666 review response — 2026-10-28
+
+## #20 — Rollback of an operation 8 cascade — OPEN (defects fixed in code; live run pending)
+
+The review (B3) found four defects in the restore path. All four are now fixed in
+ts-cli 0.187.0 and covered by unit tests (`tests/test_dependency_command.py`
+`TestCascadeDeleteRollback`, `tests/test_dependency_backup.py`):
+
+| Defect | Fix |
+|---|---|
+| A `LOGICAL_TABLE` source was restored in place at a deleted GUID, and the `ts tml import` fallback could not read the backup's `{type,guid,tml,info}` wrapper | `ts dependency backup` takes `"source_deleted": true`. The source then carries `intent: DELETE` and is re-created under a new GUID. The fallback is removed from SKILL.md |
+| A `LOGICAL_COLUMN` cascade deletes whole Models. Their Answers and Liveboards, exported with `export_fqn=True`, were restored still pointing at the old Model GUID | `rollback` substitutes every re-created object's new GUID into the TML of the objects restored after it (`remap_guids`). The restore order (tables → Models → Views → Answers → Liveboards) guarantees the referenced object exists first |
+| `sql_view` had no rank in `DELETE_ORDER`, so it restored last, after the Models built on it | `SQL_VIEW` ranks with `TABLE` (5) and restores first. The legacy `PINBOARD` key ranks with `LIVEBOARD` |
+| `rollback` exited 0 when objects failed, and SKILL.md never told the executor to read `failed[]` | It exits 1 on any failure, after printing the JSON. SKILL.md 8b makes the executor report every failed entry and never call a partial restore done |
+
+**Still open — a live run.** None of this has run against a cluster. The smoke test's
+delete leg now takes a backup, applies, rolls back and checks the restored objects
+(`--run-delete --run-rollback`). Run it once on a disposable column whose cascade
+includes a Model and an Answer. That exercises the GUID remap, the case that matters
+most. Record the result here. SKILL.md's confirmation screen tells the user the restore
+is unverified until then.
+
+The clean-fix suggestion in the 2026-10-16 entry (a plan form with a `DELETE_SOURCE`
+intent) is what `source_deleted` implements.
+
+## #21 — Backup-to-apply race — RESOLVED 2026-10-28 (mitigated; residual window documented)
+
+Review B4. The server recomputes the cascade at `apply_changes=true`, so an object saved
+between the preview and the apply was deleted with no backup. SKILL.md 8d now re-runs the
+preview immediately before applying and refuses unless its object set equals the backup
+manifest's DELETE set (the sibling's `dependency_apply.py` drift check is the precedent).
+**What remains:** a window of a few seconds between the re-check and the apply. It cannot
+be closed from the client, because the endpoint has no "apply exactly this set" parameter.
+The post-apply diff names anything deleted without a backup under its own heading.
+
+## #22 — Multi-GUID operation 8 — RESOLVED 2026-10-28 (refused)
+
+Review B5. `ts dependency backup` takes one `source`, so two columns on two tables could
+not both be backed up and restored. Operation 8 now accepts exactly one GUID and asks the
+user to run it once per object.

@@ -80,7 +80,7 @@ REQUIRED_EXTRA_ARGS: dict[str, list[str]] = {
 # silently on every push (PR #505 review, finding 2). These are refused outright: a
 # destructive leg is run by hand or not at all.
 DESTRUCTIVE_FLAGS: dict[str, frozenset[str]] = {
-    "ts-dependency-cleanup": frozenset({"--run-delete"}),
+    "ts-dependency-cleanup": frozenset({"--run-delete", "--run-rollback"}),
 }
 
 

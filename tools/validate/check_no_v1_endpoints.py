@@ -42,7 +42,10 @@ import ast
 import sys
 from pathlib import Path
 
-V1_MARKER = "/tspublic/v1/"
+# No trailing slash: a base-path constant such as f"{base}/callosum/v1/tspublic/v1"
+# (paths appended later) never contains "/tspublic/v1/" and slipped through with one
+# (PR #666 review, B6).
+V1_MARKER = "/tspublic/v1"
 
 # v2 endpoints that were current when written but have since been superseded by a
 # newer v2 shape (2026-07 audit finding 13.1). Denylisting the bare/deprecated form
@@ -70,9 +73,20 @@ SCAN_DIRS = ("tools", "agents", "scripts")
 EXCLUDE_DIRS = ("tools/validate",)
 
 
+# Files allowed to call v1, by exact path. Each entry names the documented exception in
+# `.claude/rules/ts-cli.md` it relies on; an entry without one is a bypass, not an
+# exception. Keep this list short — every entry is v1 code that 404s on newer builds.
+EXEMPT_FILES = {
+    # ts-dependency-cleanup drives the v1 /dependency family, which has no v2
+    # equivalent; its smoke test makes the same calls. Exception documented in that
+    # skill's SKILL.md ("Why raw REST"). Retire with the skill's open item #6.
+    "tools/smoke-tests/smoke_ts_dependency_cleanup.py",
+}
+
+
 def _is_excluded(rel: Path) -> bool:
     rel_str = rel.as_posix()
-    return any(rel_str.startswith(d + "/") for d in EXCLUDE_DIRS)
+    return rel_str in EXEMPT_FILES or any(rel_str.startswith(d + "/") for d in EXCLUDE_DIRS)
 
 
 def _is_test_file(path: Path) -> bool:

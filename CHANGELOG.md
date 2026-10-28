@@ -6,6 +6,8 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
 ---
 
 ## 2026-10-30
+- fix: ts-cli — `ts dependency rollback` restores a cascade delete correctly: each restored object's new GUID is substituted into the objects restored after it (a restored Answer bound to the deleted Model before), a SQL View restores before the Models built on it (it had no rank and restored last), and the command exits 1 when any object fails to restore (it exited 0). `ts dependency backup` takes `"source_deleted": true` for an operation that deletes the source itself, so rollback re-creates it instead of updating it in place at a GUID that no longer exists. Found in the PR #666 review.
+- chore: bump ts-cli to v0.192.0
 - feat(audit): grading into data (ts-audit v2 roadmap PR 2.4). New catalog key `parameters` for code-rule tuning numbers (H2, H10); D1 and H10 graded from the catalog; P2 reads the formula expression; H1 and the readiness score share one name test; `ts audit run` no longer ends on a null or numeric name. ts-audit 3.7.0
 - chore: bump ts-cli to v0.191.0
 - feat(audit): noise fixes (ts-audit v2 roadmap PR 2.3), with BL-112. D3 rolls LEFT/RIGHT outer joins into one INFO per Model; H2 drops the "The "/"A " boilerplate test; A1/A2 count visible columns only; D5, D10, D11, H3 and P7 find tables by alias; S1 matches display names with whole-word short tokens; S5 matches a spaced "API Key"; P18 ignores references and literals and names its kind; the audit smoke test runs `ts audit run`/`report`. ts-audit 3.6.0

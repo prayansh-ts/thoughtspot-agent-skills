@@ -31,3 +31,9 @@ def test_every_destructive_flag_exists_in_its_smoke_test():
         src = run_smoke_tests._smoke_test_path(skill).read_text()
         for flag in flags:
             assert f'"{flag}"' in src, f"{skill}: {flag} not declared in its smoke test"
+
+
+def test_run_rollback_is_refused_too():
+    # It writes (re-imports objects) and only makes sense after --run-delete.
+    assert run_smoke_tests.destructive_args(
+        "ts-dependency-cleanup", ["--run-rollback"]) == ["--run-rollback"]
