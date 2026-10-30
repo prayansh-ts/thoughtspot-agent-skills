@@ -164,8 +164,8 @@ def _column_details(jar: Path, v1: str, id_arg: str, verify: bool) -> tuple[int,
     return status, status == 200 and bool(json.loads(body or "{}").get("storables"))
 
 
-def _require_ts_version(minimum: tuple[int, ...] = (0, 191, 0)) -> None:
-    """Step 6's rollback needs 0.191.0's GUID remap: check before anything is deleted."""
+def _require_ts_version(minimum: tuple[int, ...] = (0, 192, 0)) -> None:
+    """Step 6's rollback needs 0.192.0's GUID remap: check before anything is deleted."""
     res = subprocess.run(["ts", "--version"], capture_output=True, text=True)
     try:
         have = tuple(int(x) for x in res.stdout.strip().split("."))
