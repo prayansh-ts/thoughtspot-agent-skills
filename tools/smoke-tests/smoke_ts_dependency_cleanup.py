@@ -156,6 +156,26 @@ def _backup_type(obj: dict) -> str:
     return BACKUP_TYPE[t]
 
 
+def _column_details(jar: Path, v1: str, id_arg: str, verify: bool) -> tuple[int, bool]:
+    """(status, has_storables) for the column's metadata/details (open item #23)."""
+    status, body = _curl(["-b", str(jar), "-G", f"{v1}/metadata/details",
+                          "--data-urlencode", "type=LOGICAL_COLUMN",
+                          "--data-urlencode", f"id={id_arg}"], verify)
+    return status, status == 200 and bool(json.loads(body or "{}").get("storables"))
+
+
+def _require_ts_version(minimum: tuple[int, ...] = (0, 191, 0)) -> None:
+    """Step 6's rollback needs 0.191.0's GUID remap: check before anything is deleted."""
+    res = subprocess.run(["ts", "--version"], capture_output=True, text=True)
+    try:
+        have = tuple(int(x) for x in res.stdout.strip().split("."))
+    except ValueError:
+        have = ()
+    if res.returncode != 0 or have < minimum:
+        _fail(f"ts {res.stdout.strip() or '(no --version)'} is older than "
+              f"{'.'.join(map(str, minimum))}; nothing was deleted")
+
+
 def _take_backup(profile: str, source_guid: str, source_type: str, objs: list) -> Path:
     plan = {
         "operation": "REMOVE",
@@ -329,6 +349,15 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
             run_delete = False
         backup_dir: Path | None = None
         if run_delete:
+            _require_ts_version()
+            # Positive control for the post-delete check: a live column must show
+            # `storables`, or an absent one later proves nothing (open item #23).
+            status, live = _column_details(jar, v1, id_arg, verify)
+            if not live:
+                _fail(f"control: metadata/details for the live column returned {status} "
+                      "without `storables`, so the post-delete check cannot be trusted "
+                      "(open item #23); nothing was deleted")
+            print("  PASS  control: metadata/details shows the live column")
             backup_dir = _take_backup(profile_name, source_guid, source_type, preview_objs)
             print(f"  PASS  backup written to {backup_dir}")
             print(f"  About to IRREVERSIBLY delete {len(preview_ids)} object(s) plus "
@@ -376,17 +405,16 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
             print("  PASS  post-delete lookup reports no dependents")
             # An empty lookup reads the same for a column that is gone and for one that
             # survived with no dependents left, so it cannot prove the delete. The
-            # column's own details can: an absent `storables` array means it is gone.
-            status, body = _curl(["-b", str(jar), "-G", f"{v1}/metadata/details",
-                                  "--data-urlencode", "type=LOGICAL_COLUMN",
-                                  "--data-urlencode", f"id={id_arg}"], verify)
-            if status == 200 and json.loads(body or "{}").get("storables"):
+            # column's own details can, against the control taken before the delete.
+            status, still = _column_details(jar, v1, id_arg, verify)
+            if still:
                 _fail("the column still exists after the delete (partial delete)")
             if status != 200:
                 print(f"  WARN  metadata/details returned {status}; could not confirm the "
-                      "column itself is gone — record this under open item #20")
+                      "column itself is gone — record this under open item #23")
             else:
-                print("  PASS  metadata/details confirms the column is gone")
+                print("  PASS  metadata/details no longer shows the column (record the "
+                      "response under open item #23)")
 
         # --- Step 6: rollback (opt-in, needs step 5) -----------------------
         print("\nStep 6  ts dependency rollback of the step-5 backup")

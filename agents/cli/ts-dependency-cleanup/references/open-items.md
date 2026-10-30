@@ -534,13 +534,15 @@ ts-cli 0.191.0 and covered by unit tests (`tests/test_dependency_command.py`
 | `sql_view` had no rank in `DELETE_ORDER`, so it restored last, after the Models built on it | `SQL_VIEW` ranks with `TABLE` (5) and restores first. The legacy `PINBOARD` key ranks with `LIVEBOARD` |
 | `rollback` exited 0 when objects failed, and SKILL.md never told the executor to read `failed[]` | It exits 1 on any failure, after printing the JSON. SKILL.md 8b makes the executor report every failed entry and never call a partial restore done |
 | *(pr-ready review, 2026-10-30)* A `WARNING` import status (routine on a Model import; the object IS imported) counted as a failure, so the re-created Model's new GUID never reached its Answers and Liveboards | `rollback` classifies by `IMPORTED_STATUS_CODES` (`OK`, `WARNING`), records a new GUID whenever one comes back, and refuses — rather than imports — an entry that still names a deleted object with no replacement |
+| *(pr-ready review 2, 2026-10-30)* After a partial delete, rollback re-created objects that still existed; an object whose import errored but returned a GUID, or succeeded with none, was mishandled on a re-run; the dangling-reference refusal matched any mention of a GUID, so two deleted Liveboards linking each other never restored | Rollback checks each DELETE entry with `metadata/search` and skips survivors; a returned GUID always counts as restored; a re-create with no GUID is a failure; only an `fqn:` binding is refused; a request that raises stops the run with its state saved |
 | *(pr-ready review, 2026-10-30)* A partial restore could not be finished: a re-run re-created every restored object, and a `--guid` re-run lost the GUID remap | `rollback` writes `rollback_state.json` in the backup directory after every entry; a re-run skips restored entries and seeds the remap from it |
 
 **Still open — a live run.** None of this has run against a cluster. The smoke test's
 delete leg now takes a backup, applies, rolls back and checks the restored objects
 (`--run-delete --run-rollback`). Run it once on a disposable column whose cascade
 includes a Model and an Answer. That exercises the GUID remap, the case that matters
-most. Record the result here. SKILL.md's confirmation screen tells the user the restore
+most. A column run does not exercise the `source_deleted: true` (`LOGICAL_TABLE`)
+restore; that needs its own run on a disposable table before #20 closes. Record the result here. SKILL.md's confirmation screen tells the user the restore
 is unverified until then.
 
 *Attempted 2026-10-28, not run.* Cluster A did not answer from the machine making the
@@ -566,3 +568,20 @@ The post-apply diff names anything deleted without a backup under its own headin
 Review B5. `ts dependency backup` takes one `source`, so two columns on two tables could
 not both be backed up and restored. Operation 8 now accepts exactly one GUID and asks the
 user to run it once per object.
+
+## #23 — `metadata/details` as proof of deletion — OPEN (unverified; skill says so)
+
+Found by the pr-ready review, 2026-10-30. SKILL.md 8d now confirms a delete with
+`metadata/details` ("an absent `storables` array = gone"), because an empty lookup answers
+the same for a deleted object and for one that survived with no dependents. That reading is
+**not verified**: #13 probed `metadata/details` with `type=LOGICAL_TABLE` only, and the
+smoke test calls it with `type=LOGICAL_COLUMN`. Two ways it could mislead: a live column
+whose details carry no top-level `storables` would read as deleted, and a soft-deleted
+object (#8 suggests a soft-delete tier) that still answers with `storables` would make a
+complete delete read as partial.
+
+**Mitigation in place:** the smoke test makes the same call before the delete as a positive
+control and fails if `storables` is absent there, and SKILL.md tells the executor to run that
+control and call the check unverified. **To close:** on the #20 live run, record the
+`metadata/details` response for the column (and, for a `LOGICAL_TABLE` run, the table)
+before and after the delete.

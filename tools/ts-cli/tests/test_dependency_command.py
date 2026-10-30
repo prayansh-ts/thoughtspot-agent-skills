@@ -14,6 +14,20 @@ from ts_cli.cli import app
 from runners import runner  # noqa: E402  (BL-139: one definition, see runners.py)
 
 
+import pytest  # noqa: E402
+
+from ts_cli.commands.dependency import _still_present as _real_still_present  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _deleted_objects_are_gone():
+    """Rollback checks each DELETE entry still exists before re-creating it (a partial
+    delete). The mocked clients here answer only imports, so default to "gone"; the
+    check itself is tested through `_real_still_present`, taken before this patch."""
+    with patch("ts_cli.commands.dependency._still_present", return_value=False):
+        yield
+
+
 def _all_output(result):
     try:
         return (result.stdout or "") + (result.stderr or "")
@@ -600,6 +614,83 @@ class TestCascadeDeleteRollback:
         assert client.post.call_count == 1          # the Answer was never sent
         refused = {f["guid"]: f["error"] for f in out["failed"]}
         assert self.MODEL in refused[self.ANSWER]
+
+    def test_an_object_a_partial_delete_left_is_not_recreated(self, tmp_path):
+        backup_dir = self._backup_dir(tmp_path)
+        # Only the Answer was deleted; the Model survived the partial delete.
+        with patch("ts_cli.commands.dependency._still_present",
+                   side_effect=lambda client, e: e["guid"] == self.MODEL):
+            result, client = self._rollback(backup_dir, ["OK"])
+        assert result.exit_code == 0, _all_output(result)
+        out = json.loads(result.stdout)
+        assert [s["guid"] for s in out["skipped"]] == [self.MODEL]
+        assert client.post.call_count == 1                       # the Answer only
+        answer_tml = client.post.call_args.kwargs["json"]["metadata_tmls"][0]
+        assert f"fqn: {self.MODEL}" in answer_tml                # bound to the survivor
+
+    def test_a_guid_outside_a_binding_reference_is_not_refused(self, tmp_path):
+        # Two deleted objects that merely mention each other (a note tile's link) must
+        # still restore; only an `fqn:` binding makes the import resolve to a dead object.
+        import yaml
+        backup_dir = self._backup_dir(tmp_path)
+        manifest = json.load(open(os.path.join(backup_dir, "manifest.json")))
+        model_file = next(o["backup_file"] for o in manifest["objects"] if o["guid"] == self.MODEL)
+        item = json.load(open(model_file))
+        item["tml"]["model"]["description"] = f"see answer {self.ANSWER}"
+        json.dump(item, open(model_file, "w"))
+        result, _ = self._rollback(backup_dir, ["OK", "OK"])
+        assert result.exit_code == 0, _all_output(result)
+
+    def test_a_recreate_with_no_guid_is_a_failure_not_a_restore(self, tmp_path):
+        backup_dir = self._backup_dir(tmp_path)
+        client = MagicMock()
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = [{"response": {"status": {"status_code": "OK"}}}]
+        client.post.return_value = resp
+        with patch("ts_cli.commands.dependency.ThoughtSpotClient", return_value=client), \
+             patch("ts_cli.commands.dependency.resolve_profile", return_value="test"):
+            result = runner.invoke(app, ["dependency", "rollback", "--backup-dir", backup_dir,
+                                         "--profile", "test"])
+        assert result.exit_code == 1
+        out = json.loads(result.stdout)
+        assert out["succeeded"] == []
+        state = json.load(open(os.path.join(backup_dir, "rollback_state.json")))
+        assert state["restored"] == []                            # a re-run tries again
+
+    def test_a_raising_import_stops_the_run_and_keeps_the_state(self, tmp_path):
+        backup_dir = self._backup_dir(tmp_path)
+        client = MagicMock()
+        client.post.side_effect = ConnectionError("reset by peer")
+        with patch("ts_cli.commands.dependency.ThoughtSpotClient", return_value=client), \
+             patch("ts_cli.commands.dependency.resolve_profile", return_value="test"):
+            result = runner.invoke(app, ["dependency", "rollback", "--backup-dir", backup_dir,
+                                         "--profile", "test"])
+        assert result.exit_code == 1
+        out = json.loads(result.stdout)
+        assert client.post.call_count == 1
+        assert "outcome unknown" in out["failed"][0]["error"]
+        assert os.path.isfile(os.path.join(backup_dir, "rollback_state.json"))
+
+    def test_a_created_guid_on_an_error_is_not_created_again(self, tmp_path):
+        backup_dir = self._backup_dir(tmp_path)
+        first, _ = self._rollback(backup_dir, ["ERROR_WITH_GUID", None])
+        assert first.exit_code == 1
+        state = json.load(open(os.path.join(backup_dir, "rollback_state.json")))
+        assert self.MODEL in state["restored"]
+
+    def test_still_present_reads_metadata_search(self):
+        _still_present = _real_still_present
+        client = MagicMock()
+        found = MagicMock(ok=True)
+        found.json.return_value = [{"metadata_header": {"modified": 1}}]
+        gone = MagicMock(ok=True)
+        gone.json.return_value = []
+        client.post.side_effect = [found, gone]
+        entry = {"guid": self.MODEL, "type": "MODEL"}
+        assert _still_present(client, entry) is True
+        assert _still_present(client, entry) is False
+        assert client.post.call_args.kwargs["json"]["metadata"][0]["type"] == "LOGICAL_TABLE"
 
     def test_a_rerun_resumes_without_duplicating_or_losing_the_remap(self, tmp_path):
         backup_dir = self._backup_dir(tmp_path)

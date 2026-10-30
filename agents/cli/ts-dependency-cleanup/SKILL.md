@@ -640,6 +640,9 @@ it ran:**
   still unrestored is refused, not imported against a dead GUID. Never delete
   `rollback_state.json` to "retry cleanly" — that re-creates every object already
   restored.
+- **After a partial delete** run the same full command: rollback checks each backed-up
+  object first and skips (`skipped[]`, "still exists") any the delete left in place, so
+  survivors are not duplicated and restored dependents bind to them.
 - **`warnings[]`** → objects that were restored with a platform notice (a Model's routine
   `WARNING`). They are restored; show the notices.
 - **`new_guids`** → show the `old GUID → new GUID` table. Every re-created object has a
@@ -745,7 +748,7 @@ echo "curl exit: $?"
 | Outcome | Meaning | Action |
 |---|---|---|
 | `400 METADATA_ERROR` | A business rule refused it | See 8e. Nothing was deleted |
-| Any other non-200, curl exit `28` (timeout), or `000` | **Unknown.** The server may have acted before failing | **Never re-send the apply.** Run the 8d re-check call once more and compare it with the 8a preview, **then check the source itself** with `metadata/details` (an absent `storables` array = gone). An empty list for `{guid}` (`{"dependents":{"{guid}":[]}}`) means the source **still exists** with no dependents left — that is a partial delete, not a full one. Only when the source is gone *and* none of its backed-up dependents remain did the delete happen: report the backed-up set as what was removed and go to the post-apply checks. If the preview is unchanged, nothing was applied: report the failure verbatim and stop. If only part of it changed, the delete is **partial**: say so plainly, list what is gone and what remains, and point to the backup |
+| Any other non-200, curl exit `28` (timeout), or `000` | **Unknown.** The server may have acted before failing | **Never re-send the apply.** Run the 8d re-check call once more and compare it with the 8a preview, **then check the source itself** with `metadata/details` (an absent `storables` array reads as gone — **unverified, open item #23**: compare against the same call made before the apply, which must show `storables`). An empty entry for `{guid}` means the source may **still exist** with no dependents left — that is a partial delete, not a full one. Only when the source is gone *and* none of its backed-up dependents remain did the delete happen: report the backed-up set as what was removed and go to the post-apply checks. If the preview is unchanged, nothing was applied: report the failure verbatim and stop. If only part of it changed, the delete is **partial**: say so plainly, list what is gone and what remains, and point to the backup |
 
 **4. After a `200`:**
 
@@ -761,11 +764,13 @@ echo "curl exit: $?"
 - Save the applied `csv` alongside the table, print the path, and note it is
   session-scoped temp storage to copy elsewhere.
 - Print the backup directory again, with the rollback command.
-- Confirm the source is gone with `metadata/details` for `{guid}`: an absent `storables`
-  array confirms deletion. **Do not take an empty lookup as proof.** A lookup answers
-  `{"{guid}": []}` (or `{}`) both for an object that is gone and for one that still
-  exists with no dependents, so it cannot tell a full delete from a partial one.
-  Spot-check deleted dependents the same way.
+- Confirm the source is gone with `metadata/details` for `{guid}`. An absent `storables`
+  array reads as deleted, but that reading is **unverified (open item #23)**: run the
+  same call *before* the apply as a control (it must show `storables`), and say the check
+  is unverified when you report it. **Do not take an empty lookup as proof.** A lookup
+  answers `{"<guid>":{}}` (see operations 1–6) both for an object that is gone and for
+  one that still exists with no dependents, so it cannot tell a full delete from a
+  partial one. Spot-check deleted dependents the same way.
 
 ### 8e — Business-rule refusals are normal, and are not your bug
 

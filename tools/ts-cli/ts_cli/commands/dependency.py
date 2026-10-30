@@ -364,7 +364,7 @@ def backup_cmd(
     exported: List[tuple] = [(obj, _export_one(client, obj)) for obj in to_backup]
 
     # Every export succeeded — now (and only now) write files.
-    out_dir_base = plan.get("out_dir") or "/tmp"
+    out_dir_base = os.path.abspath(os.path.expanduser(plan.get("out_dir") or "/tmp"))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_dir = os.path.join(out_dir_base, f"ts_dep_backup_{timestamp}")
     os.makedirs(backup_dir, exist_ok=True)
@@ -493,8 +493,12 @@ def _rollback_one_entry(client: ThoughtSpotClient, entry: dict, results: Dict[st
     tml_yaml = _dump_tml_yaml(tml_dict, strip_guid=was_deleted, guid=entry.get("guid"))
     tml_yaml = remap_guids(tml_yaml, results["new_guids"])
     own = entry.get("guid")
+    # Only a binding reference (`fqn: <guid>`) makes the import resolve to a dead object;
+    # a GUID elsewhere (a note tile's link) does not, and two Liveboards linking each
+    # other must still restore.
     dangling = sorted(g for g in results["deleted_guids"]
-                      if g != own and g not in results["new_guids"] and g in tml_yaml)
+                      if g != own and g not in results["new_guids"]
+                      and re.search(rf"fqn:\s*['\"]?{re.escape(g)}", tml_yaml))
     if dangling:
         err = ("references deleted object(s) not restored yet: " + ", ".join(dangling)
                + " — restore those first; importing now would bind to a dead GUID")
@@ -526,6 +530,11 @@ def _record_import_outcome(resp, entry: dict, was_deleted: bool, results: Dict[s
     if new_guid:
         results["new_guids"][own] = new_guid
 
+    if ok and was_deleted and not new_guid:
+        ok = False
+        status = dict(status, error_message=(
+            "imported, but ThoughtSpot returned no new GUID, so its dependents cannot be "
+            "re-linked. Find it by name before re-running: a re-run would create it again"))
     if ok:
         label = f"{name} (new GUID: {new_guid})" if new_guid else name
         results["succeeded"].append({"guid": own, "name": name, "label": label})
@@ -540,6 +549,49 @@ def _record_import_outcome(resp, entry: dict, was_deleted: bool, results: Dict[s
             failure["created_guid"] = new_guid
         results["failed"].append(failure)
         print(f"  ✗ Rollback failed: {name} — {err}", file=sys.stderr)
+
+
+def _still_present(client: ThoughtSpotClient, entry: dict) -> bool:
+    """True when a DELETE entry's original GUID still answers `metadata/search` — a
+    partial delete left it in place. Not found, or any error, reads as deleted (the
+    behaviour before this check existed)."""
+    from ts_cli.commands.dependency_apply import _current_modified   # it imports this module
+    from ts_cli.dependency.apply import v2_type_for
+    found, _modified, _err = _current_modified(client, entry.get("guid"),
+                                               v2_type_for(entry.get("type", "")))
+    return found
+
+
+def _run_rollback(client: ThoughtSpotClient, ordered: list, results: Dict[str, object],
+                  restored: set, present: set, state_path: str) -> None:
+    """Restore each entry in order, saving `rollback_state.json` after every one. An
+    object whose import returned a GUID counts as restored even if the status was an
+    error, so a re-run never creates it twice. A request that raises leaves the outcome
+    unknown: it is recorded and the run stops rather than guessing."""
+    for entry in ordered:
+        guid, name = entry.get("guid"), entry.get("name")
+        reason = ("restored by an earlier run" if guid in restored
+                  else "still exists (the delete did not remove it)" if guid in present else None)
+        if reason:
+            results["skipped"].append({"guid": guid, "name": name, "reason": reason})
+            print(f"  – Skipped: {name} — {reason}", file=sys.stderr)
+            continue
+        try:
+            _rollback_one_entry(client, entry, results)
+        except Exception as exc:  # noqa: BLE001 — the server may have acted; never guess
+            results["failed"].append({"name": name, "guid": guid,
+                                      "error": f"outcome unknown ({exc}); check whether it exists before re-running"})
+            print(f"  ✗ Rollback stopped: {name} — outcome unknown ({exc})", file=sys.stderr)
+            _save_rollback_state(state_path, results, restored)
+            return
+        restored.update(s["guid"] for s in results["succeeded"])
+        restored.update(results["new_guids"])
+        _save_rollback_state(state_path, results, restored)
+
+
+def _save_rollback_state(state_path: str, results: Dict[str, object], restored: set) -> None:
+    with open(state_path, "w") as f:
+        json.dump({"new_guids": results["new_guids"], "restored": sorted(restored)}, f, indent=2)
 
 
 @app.command("rollback")
@@ -628,18 +680,14 @@ def rollback_cmd(
                           if e.get("intent") == "DELETE" and e.get("guid")},
     }
     restored = set(state["restored"])
+    # A partial delete leaves some "deleted" objects in place: never re-create those, and
+    # let dependents bind to them where they are.
+    present = {e.get("guid") for e in manifest.get("objects", [])
+               if e.get("guid") in results["deleted_guids"] and e.get("guid") not in restored
+               and _still_present(client, e)}
+    results["deleted_guids"] -= present
 
-    for entry in ordered:
-        if entry.get("guid") in restored:
-            results["skipped"].append({"guid": entry.get("guid"), "name": entry.get("name"),
-                                       "reason": "restored by an earlier run"})
-            print(f"  – Skipped: {entry.get('name')} — restored by an earlier run", file=sys.stderr)
-            continue
-        _rollback_one_entry(client, entry, results)
-        restored.update(s["guid"] for s in results["succeeded"])
-        with open(state_path, "w") as f:
-            json.dump({"new_guids": results["new_guids"], "restored": sorted(restored)}, f, indent=2)
-
+    _run_rollback(client, ordered, results, restored, present, state_path)
     del results["deleted_guids"]
     print(json.dumps(results))
     if results["failed"]:

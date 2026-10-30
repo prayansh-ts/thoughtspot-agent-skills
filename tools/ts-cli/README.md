@@ -874,16 +874,20 @@ dependent restores onto them). An entry with
 (the object no longer exists at that GUID, so ThoughtSpot assigns a new one); every
 other entry is updated in place at its original GUID. Each restored delete's new GUID
 is substituted into the TML of every entry restored after it, so a restored Answer
-binds to the restored Model rather than to the deleted original. An entry that still
-names a deleted object with no replacement is refused (listed in `failed`) rather than
-imported against a dead GUID. A `WARNING` import status counts as restored (the object
-was imported; listed under `warnings`), and a new GUID is recorded whenever one comes
-back.
+binds to the restored Model rather than to the deleted original. Before re-creating a
+`DELETE` entry, rollback checks it with `metadata/search`: one that still exists (a
+partial delete left it) is skipped, and its dependents bind to it. An entry whose `fqn:`
+still names a deleted object with no replacement is refused (listed in `failed`) rather
+than imported against a dead GUID. A `WARNING` import status counts as restored (listed
+under `warnings`); a re-create that returns no GUID is a failure, since its dependents
+cannot be re-linked. A request that raises stops the run with its state saved.
 
 **Resumable.** Progress is written to `rollback_state.json` in the backup directory after
-every entry. Re-running skips each entry already restored (listed under `skipped`) and
-reuses the earlier run's GUID remap, so finishing a partial restore neither duplicates
-objects nor binds a dependent to the deleted original. Delete that file only to restore
+every entry. Re-running skips each entry already restored, including one whose import
+errored but returned a GUID (listed under `skipped`), and reuses the earlier run's GUID
+remap, so finishing a partial restore neither duplicates objects nor binds a dependent to
+the deleted original. A second rollback from the same directory is therefore a no-op for
+everything already restored. Delete that file only to restore
 everything again from scratch.
 
 **Options:**
