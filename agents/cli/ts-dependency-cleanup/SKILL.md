@@ -105,7 +105,8 @@ section and the validator exemption.
   profile**. Operation 8's backup and rollback run through `ts dependency backup` /
   `ts dependency rollback`. 0.191.0 is the release whose rollback carries new GUIDs into
   the restored dependents, restores SQL Views first, and exits non-zero on a failed
-  restore. Check with `ts --version`; an older CLI → stop and ask the user to upgrade.
+  restore. Check with `ts --version`; older than 0.191.0, or no `--version` option at all
+  (an older CLI) → stop and ask the user to upgrade.
 
 Credentials follow the repo-wide convention (`.claude/rules/security.md`): the profile
 in `~/.claude/thoughtspot-profiles.json` holds `base_url`, `username` and the **name** of
@@ -131,23 +132,34 @@ one, show it and confirm. Save `{name}`, `{slug}` (the profile slug, per
 `ts-profile-thoughtspot`), `{base_url}` (no trailing slash), `{username}`,
 `{password_env}` and `{verify_ssl}`.
 
+**The profile must use password auth.** v1 `session/login` takes a password. If the
+profile has no `password_env` (a token or secret-key profile), stop and tell the user this
+skill needs a password profile; never substitute another field for `{password_env}`.
+
 Confirm the credential is present **without revealing it**:
 
 ```bash
-printenv {password_env} >/dev/null && echo "credential present" || echo "MISSING — export it first"
+[ -n "{password_env}" ] && printenv -- "{password_env}" >/dev/null \
+  && echo "credential present" || echo "MISSING — export it first"
 ```
 
-If it is missing, stop and tell the user to export it in their own terminal.
+If it is missing, stop and tell the user to export it in their own terminal. (`printenv`
+with no name lists every variable and exits 0, so the name is checked for emptiness first;
+an empty name must never reach the login below, which would send the whole environment.)
 
 ### 1a — Create the session directory
 
 **Each Bash call is a fresh shell — variables do not survive between calls.** So the
 session lives in a fixed directory, and every later block re-derives its path from the
-slug. That directory holds the cookie jar, a curl config file, and the two base URLs:
+slug. It sits under `$HOME`, not the shared `/tmp`: later blocks *source* `$S/env`, so a
+directory another local user could create first would run their code in the shell that
+holds the password. That directory holds the cookie jar, a curl config file, and the two base URLs:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"
 mkdir -p "$S" && chmod 700 "$S"
+[ -d "$S" ] && [ ! -L "$S" ] && [ -O "$S" ] \
+  || { echo "STOP: $S is not a private directory you own"; exit 1; }
 {
   echo 'silent'
   echo 'show-error'
@@ -175,8 +187,9 @@ a hung cluster fails instead of blocking the session.
 ### 1b — Log in
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
-printenv {password_env} | tr -d '\n' | curl -K "$S/curlrc" -o /dev/null \
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
+[ -n "{password_env}" ] || { echo "STOP: no password_env"; exit 1; }
+printenv -- "{password_env}" | tr -d '\n' | curl -K "$S/curlrc" -o /dev/null \
   -w 'login -> %{http_code}\n' \
   -X POST "$V1/session/login" \
   --data-urlencode "username={username}" \
@@ -190,7 +203,7 @@ chmod 600 "$S/cookies"
 Verify the cookie works before offering the menu:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 curl -K "$S/curlrc" -o /dev/null -w 'session/info -> %{http_code}\n' "$V1/session/info"
 ```
 
@@ -203,7 +216,7 @@ out and deletes the directory.
 **Every call template below starts with the same line**:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 ```
 
 ---
@@ -321,7 +334,7 @@ is verified, and the physical case is the awkward one:
 | `PHYSICAL_TABLE`, `PHYSICAL_COLUMN` | **`metadata/list` returns 500 for these.** Instead call `GET metadata/details?type=LOGICAL_TABLE&id=["<one-to-one-table-guid>"]` and read `physicalTableGUID` / `physicalColumnGUID` out of the response |
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 # logical types — direct
 curl -K "$S/curlrc" -G "$V1/metadata/list" \
   --data-urlencode "type=LOGICAL_COLUMN" --data-urlencode "batchsize=50"
@@ -382,7 +395,7 @@ Every operation uses the same shape — only the path and body differ:
 Operations 2–7 are **GET**, with the id array as a query parameter:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 curl -K "$S/curlrc" -G "$V1/dependency/{endpoint}" \
   --data-urlencode 'id=["guid-1","guid-2"]' \
   -w '\n%{http_code}\n'
@@ -391,7 +404,7 @@ curl -K "$S/curlrc" -G "$V1/dependency/{endpoint}" \
 Operation 1 is **POST**, form-encoded, and additionally takes `type`:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 curl -K "$S/curlrc" -w '\n%{http_code}\n' \
   -X POST "$V1/dependency/listdependents" \
   --data-urlencode 'type={TYPE}' \
@@ -499,7 +512,7 @@ Always call once with `apply_changes=false` first, whatever the user asked for. 
 response; 8b and 8d read it:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 curl -K "$S/curlrc" -o "$S/preview.json" -w 'preview -> %{http_code}\n' \
   -X POST "$D/delete-with-dependents" \
   --data-urlencode 'type={TYPE}' \
@@ -549,10 +562,10 @@ fails**, then writes one file per object plus a `manifest.json` that
 **1. Pick the backup location.** Ask:
 
 ```
-Where should the TML backup be saved?
+Where should the TML backup be saved? It is the only way back from this delete.
 
-  1  /tmp/   (default — ephemeral, cleared on reboot)
-  2  Custom path   (recommended — somewhere durable)
+  1  ~/ts_dependency_backups/   (default — durable)
+  2  Custom path
 
 Enter 1 or a path [default: 1]:
 ```
@@ -618,7 +631,17 @@ it ran:**
 - **Exit code 1, or a non-empty `failed[]`** → the restore is partial. List every failed
   object with its error and its backup file (from `manifest.json`). Say plainly that the
   restore is incomplete. Never report a rollback as done unless the exit code is 0 and
-  `failed` is empty.
+  `failed` is empty. A `failed` entry carrying `created_guid` **does exist** on the
+  cluster under that GUID despite the error; say so.
+- **Finishing a partial restore:** fix the cause, then re-run the **same** command. It
+  resumes from `rollback_state.json` in the backup directory: objects already restored
+  are skipped (`skipped[]`) and their new GUIDs are reused, so nothing is created twice
+  and no dependent binds to a deleted original. An object whose referenced object is
+  still unrestored is refused, not imported against a dead GUID. Never delete
+  `rollback_state.json` to "retry cleanly" — that re-creates every object already
+  restored.
+- **`warnings[]`** → objects that were restored with a platform notice (a Model's routine
+  `WARNING`). They are restored; show the notices.
 - **`new_guids`** → show the `old GUID → new GUID` table. Every re-created object has a
   new GUID.
 
@@ -674,7 +697,7 @@ apply only if it lists exactly what was backed up.
 **1. Re-check:**
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 curl -K "$S/curlrc" -o "$S/recheck.json" -w 'recheck -> %{http_code}\n' \
   -X POST "$D/delete-with-dependents" \
   --data-urlencode 'type={TYPE}' \
@@ -707,7 +730,7 @@ the race to a few seconds; it does not close it. The diff after the apply catche
 slips through:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 curl -K "$S/curlrc" --max-time 600 -o "$S/applied.json" -w 'apply -> %{http_code}\n' \
   -X POST "$D/delete-with-dependents" \
   --data-urlencode 'type={TYPE}' \
@@ -722,7 +745,7 @@ echo "curl exit: $?"
 | Outcome | Meaning | Action |
 |---|---|---|
 | `400 METADATA_ERROR` | A business rule refused it | See 8e. Nothing was deleted |
-| Any other non-200, curl exit `28` (timeout), or `000` | **Unknown.** The server may have acted before failing | **Never re-send the apply.** Run the 8d re-check call once more and compare it with the 8a preview. If the object and its dependents are gone (`{}`, or an empty / missing entry for `{guid}`), the delete happened: report the backed-up set as what was removed and go to the post-apply checks. If the preview is unchanged, nothing was applied: report the failure verbatim and stop. If only part of it changed, the delete is **partial**: say so plainly, list what is gone and what remains, and point to the backup |
+| Any other non-200, curl exit `28` (timeout), or `000` | **Unknown.** The server may have acted before failing | **Never re-send the apply.** Run the 8d re-check call once more and compare it with the 8a preview, **then check the source itself** with `metadata/details` (an absent `storables` array = gone). An empty list for `{guid}` (`{"dependents":{"{guid}":[]}}`) means the source **still exists** with no dependents left — that is a partial delete, not a full one. Only when the source is gone *and* none of its backed-up dependents remain did the delete happen: report the backed-up set as what was removed and go to the post-apply checks. If the preview is unchanged, nothing was applied: report the failure verbatim and stop. If only part of it changed, the delete is **partial**: say so plainly, list what is gone and what remains, and point to the backup |
 
 **4. After a `200`:**
 
@@ -738,9 +761,11 @@ echo "curl exit: $?"
 - Save the applied `csv` alongside the table, print the path, and note it is
   session-scoped temp storage to copy elsewhere.
 - Print the backup directory again, with the rollback command.
-- Re-run the matching lookup (operations 1–6) for the id and confirm it now returns
-  empty. Spot-check individual objects via `metadata/details`: an absent `storables`
-  array confirms deletion.
+- Confirm the source is gone with `metadata/details` for `{guid}`: an absent `storables`
+  array confirms deletion. **Do not take an empty lookup as proof.** A lookup answers
+  `{"{guid}": []}` (or `{}`) both for an object that is gone and for one that still
+  exists with no dependents, so it cannot tell a full delete from a partial one.
+  Spot-check deleted dependents the same way.
 
 ### 8e — Business-rule refusals are normal, and are not your bug
 
@@ -799,7 +824,7 @@ request shape. Report it and stop.
 End the server session, then delete the session directory. It holds a live cookie:
 
 ```bash
-S="${TMPDIR:-/tmp}/ts_dep_cleanup_{slug}"; . "$S/env"
+S="$HOME/.cache/ts_dep_cleanup_{slug}"; . "$S/env"
 curl -K "$S/curlrc" -o /dev/null -w 'logout -> %{http_code}\n' -X POST "$V1/session/logout"
 rm -rf "$S"
 ```

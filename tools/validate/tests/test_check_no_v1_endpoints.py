@@ -128,3 +128,17 @@ def test_exempt_files_are_exact_paths():
         assert nv._is_excluded(Path(rel))
     # A sibling in the same directory is not exempted by the entry.
     assert not nv._is_excluded(Path("tools/smoke-tests/smoke_other.py"))
+
+
+def test_flags_the_v1_dependency_family(tmp_path):
+    # PR #666 review: operation 8 and purge live under /callosum/v1/dependency, outside
+    # /tspublic/v1, and passed the gate.
+    src = ('def f(base):\n    a = f"{base}/callosum/v1/dependency"\n'
+           '    return a, "/callosum/v1/dependency/purge"\n')
+    assert len(_scan_src(tmp_path, src)) == 2
+
+
+def test_other_callosum_v1_paths_are_not_flagged(tmp_path):
+    # The cohort-detail and AgentQL endpoints legitimately live under /callosum/v1/.
+    src = 'A = "/callosum/v1/metadata/detail/{guid}"\nB = "/callosum/v1/v2/data/spotql/fetch-data"\n'
+    assert _scan_src(tmp_path, src) == []

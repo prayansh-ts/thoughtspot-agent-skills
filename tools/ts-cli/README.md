@@ -13,6 +13,7 @@ pip install -e /path/to/thoughtspot-agent-skills/tools/ts-cli
 ```
 
 After install, the `ts` command is available on your PATH.
+`ts --version` prints the installed version (a skill that needs a minimum release checks it).
 
 ---
 
@@ -867,12 +868,23 @@ ts dependency rollback --backup-dir /tmp/ts_dep_backup_20260704_120000 --profile
 ts dependency rollback --backup-dir /tmp/ts_dep_backup_20260704_120000 --only deletes
 ```
 
-Restores entries in dependency-safe order (dependents before source). An entry with
+Restores entries in dependency-safe order (the objects others reference first, so each
+dependent restores onto them). An entry with
 `intent == "DELETE"` is re-imported with `create_new=True` and its `guid:` stripped
 (the object no longer exists at that GUID, so ThoughtSpot assigns a new one); every
 other entry is updated in place at its original GUID. Each restored delete's new GUID
 is substituted into the TML of every entry restored after it, so a restored Answer
-binds to the restored Model rather than to the deleted original.
+binds to the restored Model rather than to the deleted original. An entry that still
+names a deleted object with no replacement is refused (listed in `failed`) rather than
+imported against a dead GUID. A `WARNING` import status counts as restored (the object
+was imported; listed under `warnings`), and a new GUID is recorded whenever one comes
+back.
+
+**Resumable.** Progress is written to `rollback_state.json` in the backup directory after
+every entry. Re-running skips each entry already restored (listed under `skipped`) and
+reuses the earlier run's GUID remap, so finishing a partial restore neither duplicates
+objects nor binds a dependent to the deleted original. Delete that file only to restore
+everything again from scratch.
 
 **Options:**
 
@@ -882,7 +894,7 @@ binds to the restored Model rather than to the deleted original.
 | `--guid` | all | Restrict rollback to these GUID(s) (repeatable) |
 | `--only` | `all` | `updates` \| `deletes` \| `all` |
 
-**Output:** `{"succeeded": [...], "failed": [...], "new_guids": {old_guid: new_guid}}`
+**Output:** `{"succeeded": [...], "failed": [...], "skipped": [...], "warnings": [...], "new_guids": {old_guid: new_guid}}`
 to stdout. `new_guids` lets the caller surface a GUID-remap table for any restored
 delete — objects outside the backup that referenced the ORIGINAL guid remain broken
 and need manual reattachment. Per-object progress goes to stderr. **Exits 1 when any

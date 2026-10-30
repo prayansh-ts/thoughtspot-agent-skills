@@ -331,14 +331,6 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
         if run_delete:
             backup_dir = _take_backup(profile_name, source_guid, source_type, preview_objs)
             print(f"  PASS  backup written to {backup_dir}")
-            # SKILL.md 8d: the cascade must not have grown since the backup.
-            status, body = _curl(preview_args, verify)
-            recheck = _ids(json.loads(body)["dependents"].get(column_guid, [])) \
-                if status == 200 else None
-            if recheck != preview_ids:
-                _fail(f"re-check does not match the backup (status {status}); nothing "
-                      f"was deleted. Not backed up: {sorted((recheck or set()) - preview_ids)}")
-            print("  PASS  pre-apply re-check matches the backup")
             print(f"  About to IRREVERSIBLY delete {len(preview_ids)} object(s) plus "
                   f"column {column_guid}:")
             for g in sorted(preview_ids):
@@ -346,6 +338,16 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
             if input("  Type DELETE to apply, anything else to cancel: ") != "DELETE":
                 print("  CANCELLED  nothing was deleted")
                 run_delete = False
+        if run_delete:
+            # SKILL.md 8c -> 8d: re-check after the typed confirmation, immediately before
+            # applying, so the cascade cannot grow while the operator types.
+            status, body = _curl(preview_args, verify)
+            recheck = _ids(json.loads(body)["dependents"].get(column_guid, [])) \
+                if status == 200 else None
+            if recheck != preview_ids:
+                _fail(f"re-check does not match the backup (status {status}); nothing "
+                      f"was deleted. Not backed up: {sorted((recheck or set()) - preview_ids)}")
+            print("  PASS  pre-apply re-check matches the backup")
         if not run_delete:
             print("  SKIP  delete leg not run; nothing was deleted")
         else:
@@ -371,7 +373,20 @@ def run_smoke_test(profile_name: str, column_guid: str, pinboard_guid: str | Non
                                   "--data-urlencode", f"id={id_arg}"], verify)
             if json.loads(body).get(column_guid) not in ({}, None):
                 _fail("post-delete lookup still reports dependents")
-            print("  PASS  post-delete lookup confirms the column is gone")
+            print("  PASS  post-delete lookup reports no dependents")
+            # An empty lookup reads the same for a column that is gone and for one that
+            # survived with no dependents left, so it cannot prove the delete. The
+            # column's own details can: an absent `storables` array means it is gone.
+            status, body = _curl(["-b", str(jar), "-G", f"{v1}/metadata/details",
+                                  "--data-urlencode", "type=LOGICAL_COLUMN",
+                                  "--data-urlencode", f"id={id_arg}"], verify)
+            if status == 200 and json.loads(body or "{}").get("storables"):
+                _fail("the column still exists after the delete (partial delete)")
+            if status != 200:
+                print(f"  WARN  metadata/details returned {status}; could not confirm the "
+                      "column itself is gone — record this under open item #20")
+            else:
+                print("  PASS  metadata/details confirms the column is gone")
 
         # --- Step 6: rollback (opt-in, needs step 5) -----------------------
         print("\nStep 6  ts dependency rollback of the step-5 backup")

@@ -1137,7 +1137,7 @@ acknowledgment before proceeding:
 **Rollback — `ts dependency rollback`:**
 
 Map the menu choice to the command flags and run it against `{backup_dir}`. The command
-reads the manifest, restores objects in dependency-safe order (dependents before source),
+reads the manifest, restores objects in dependency-safe order (referenced objects first, then their dependents),
 re-imports DELETE-intent objects as NEW objects (new GUIDs, `guid:` stripped), and updates
 every other object in place at its original GUID.
 

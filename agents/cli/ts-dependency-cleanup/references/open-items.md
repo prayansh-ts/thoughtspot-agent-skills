@@ -87,8 +87,10 @@ longer holds, and the review was right to say so. What blocks the migration now 
 `ts dependency cascade-delete`, enforcing in code the single-id rule, the pre-apply
 re-check and profile-driven TLS. Until then, raw REST is a **documented exception**
 (SKILL.md "Why raw REST"), not a technicality. The v1 validator's blind spot (a base path
-with no trailing `/` passed `check_no_v1_endpoints.py`) is closed. The smoke test is
-now its one named exemption, so a new v1 call anywhere else fails the gate.
+with no trailing `/` passed `check_no_v1_endpoints.py`) is closed, and the gate now also
+matches `/callosum/v1/dependency` (operation 8's prefix and purge sat outside
+`/tspublic/v1` and passed it — PR #666 review). The smoke test is its one named
+exemption, for the whole file, so a new v1 call anywhere else fails the gate.
 
 ## #7 — The purge guard is session-scoped — DEFERRED with #8 (operation 9 cut from 1.0.0)
 
@@ -247,7 +249,7 @@ the handler itself is throwing. **No client-side fix.** Either a ThoughtSpot bug
 build or an undocumented required parameter. Worth a support ticket with the incident id
 (`94c3ec23-b140-45a0-ac2d-53e16d00d2aa`).
 
-## #12 — SUPERSEDED (wrong prefix — see the CLOSED entry under "Ops 8 and 9 FOUND"). First pass: absent on this build
+## #12 — SUPERSEDED (wrong prefix — see the RESOLVED entry under "Ops 8 and 9 FOUND"). First pass: absent on this build
 
 404 on POST, GET and DELETE, and on every name variant tried:
 `delete-with-dependents`, `deletewithdependents`, `deletewithdependent`, `purge`,
@@ -329,7 +331,7 @@ over. SKILL.md's bucket list and the multi-bucket note are corrected.
 users care about have richer dependency graphs. Prefer a user-supplied GUID over a
 scanned one when validating shape.
 
-## #16 — SUPERSEDED (see the CLOSED entry below). Ops 8/9 request encoding was inferred
+## #16 — SUPERSEDED (see the RESOLVED entry below). Ops 8/9 request encoding was inferred
 
 SKILL.md writes both as `POST` with `application/x-www-form-urlencoded`, matching
 operation 1 (the only other POST in the family). This is an **inference from a sibling
@@ -338,7 +340,7 @@ confirmed. On the first live call that returns `400`, retry as
 `Content-Type: application/json` with `{"id":["guid"],"apply_changes":false}` and record
 which the API accepts.
 
-## #12 — SUPERSEDED (see the CLOSED entry below). Re-probed 2026-09-03, still absent under the wrong prefix
+## #12 — SUPERSEDED (see the RESOLVED entry below). Re-probed 2026-09-03, still absent under the wrong prefix
 
 Second pass added the hypothesis that `delete-with-dependents` being **hyphenated**
 (unlike every working v1 endpoint here — `logicaltable`, `listdependents`) meant it was a
@@ -502,7 +504,7 @@ the preview, which is a different regression. Step 4 now asserts #19's actual pr
 every object the operation 2 lookup reports is contained in the operation 8 preview — and
 prints the lookup-vs-preview ratio, without deleting anything.
 
-## #20 — Rollback of a `LOGICAL_TABLE` cascade — OPEN
+## #20 — Rollback of a `LOGICAL_TABLE` cascade — SUPERSEDED (see the 2026-10-28 #20 entry below)
 
 Operation 8's backup reuses `ts dependency backup`, whose plan requires a `source`. For a
 `LOGICAL_COLUMN` delete the source is the owning Table/Model, which is modified rather
@@ -528,9 +530,11 @@ ts-cli 0.191.0 and covered by unit tests (`tests/test_dependency_command.py`
 | Defect | Fix |
 |---|---|
 | A `LOGICAL_TABLE` source was restored in place at a deleted GUID, and the `ts tml import` fallback could not read the backup's `{type,guid,tml,info}` wrapper | `ts dependency backup` takes `"source_deleted": true`. The source then carries `intent: DELETE` and is re-created under a new GUID. The fallback is removed from SKILL.md |
-| A `LOGICAL_COLUMN` cascade deletes whole Models. Their Answers and Liveboards, exported with `export_fqn=True`, were restored still pointing at the old Model GUID | `rollback` substitutes every re-created object's new GUID into the TML of the objects restored after it (`remap_guids`). The restore order (tables → Models → Views → Answers → Liveboards) guarantees the referenced object exists first |
+| A `LOGICAL_COLUMN` cascade deletes whole Models. Their Answers and Liveboards, exported with `export_fqn=True`, were restored still pointing at the old Model GUID | `rollback` substitutes every re-created object's new GUID into the TML of the objects restored after it (`remap_guids`). The restore order (tables → Models → Views → Answers → Liveboards) restores the usual referenced object first; it is by type rank, not by each object's own references, so a Model joined to a View would restore before it — the dangling-reference refusal above catches that case rather than binding it wrong |
 | `sql_view` had no rank in `DELETE_ORDER`, so it restored last, after the Models built on it | `SQL_VIEW` ranks with `TABLE` (5) and restores first. The legacy `PINBOARD` key ranks with `LIVEBOARD` |
 | `rollback` exited 0 when objects failed, and SKILL.md never told the executor to read `failed[]` | It exits 1 on any failure, after printing the JSON. SKILL.md 8b makes the executor report every failed entry and never call a partial restore done |
+| *(pr-ready review, 2026-10-30)* A `WARNING` import status (routine on a Model import; the object IS imported) counted as a failure, so the re-created Model's new GUID never reached its Answers and Liveboards | `rollback` classifies by `IMPORTED_STATUS_CODES` (`OK`, `WARNING`), records a new GUID whenever one comes back, and refuses — rather than imports — an entry that still names a deleted object with no replacement |
+| *(pr-ready review, 2026-10-30)* A partial restore could not be finished: a re-run re-created every restored object, and a `--guid` re-run lost the GUID remap | `rollback` writes `rollback_state.json` in the backup directory after every entry; a re-run skips restored entries and seeds the remap from it |
 
 **Still open — a live run.** None of this has run against a cluster. The smoke test's
 delete leg now takes a backup, applies, rolls back and checks the restored objects

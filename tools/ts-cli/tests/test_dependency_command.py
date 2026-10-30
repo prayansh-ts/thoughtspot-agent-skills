@@ -552,6 +552,78 @@ class TestCascadeDeleteRollback:
         assert self.MODEL not in answer_tml
         assert f"fqn: {self.NEW_MODEL}" in answer_tml
 
+    NEW_ANSWER = "99999999-8888-7777-6666-555555555555"
+
+    def _rollback(self, backup_dir, statuses, *extra):
+        """Run rollback with the n-th import answering `statuses[n]` (a status code,
+        or None for a request that creates nothing). Returns (result, client)."""
+        client = MagicMock()
+        replies = iter(statuses)
+        guids = iter([self.NEW_MODEL, self.NEW_ANSWER])
+
+        def fake_post(path, json=None, **kwargs):
+            code = next(replies)
+            resp = MagicMock()
+            resp.ok = True
+            block = {"status": {"status_code": code or "ERROR", "error_message": f"{code} reply"}}
+            if code:
+                block["object"] = [{"header": {"id_guid": next(guids)}}]
+            resp.json.return_value = [{"response": block}]
+            return resp
+
+        client.post.side_effect = fake_post
+        with patch("ts_cli.commands.dependency.ThoughtSpotClient", return_value=client), \
+             patch("ts_cli.commands.dependency.resolve_profile", return_value="test"):
+            result = runner.invoke(app, ["dependency", "rollback", "--backup-dir", backup_dir,
+                                         "--profile", "test", *extra])
+        return result, client
+
+    def _backup_dir(self, tmp_path):
+        backup = self._backup(tmp_path, source_deleted=True)
+        return os.path.dirname(json.loads(backup.stdout)["objects"][0]["backup_file"])
+
+    def test_a_warning_import_is_restored_and_still_rebinds(self, tmp_path):
+        # A Model import routinely answers WARNING and IS imported (tml_common).
+        result, client = self._rollback(self._backup_dir(tmp_path), ["WARNING", "OK"])
+        assert result.exit_code == 0, _all_output(result)
+        out = json.loads(result.stdout)
+        assert out["failed"] == []
+        assert out["new_guids"] == {self.MODEL: self.NEW_MODEL, self.ANSWER: self.NEW_ANSWER}
+        assert [w["guid"] for w in out["warnings"]] == [self.MODEL]
+        answer_tml = client.post.call_args_list[1].kwargs["json"]["metadata_tmls"][0]
+        assert f"fqn: {self.NEW_MODEL}" in answer_tml and self.MODEL not in answer_tml
+
+    def test_a_dependent_of_an_unrestored_object_is_refused_not_imported(self, tmp_path):
+        result, client = self._rollback(self._backup_dir(tmp_path), [None])
+        assert result.exit_code == 1
+        out = json.loads(result.stdout)
+        assert client.post.call_count == 1          # the Answer was never sent
+        refused = {f["guid"]: f["error"] for f in out["failed"]}
+        assert self.MODEL in refused[self.ANSWER]
+
+    def test_a_rerun_resumes_without_duplicating_or_losing_the_remap(self, tmp_path):
+        backup_dir = self._backup_dir(tmp_path)
+        # First run: the Model is created, then the Answer fails.
+        first, _ = self._rollback(backup_dir, ["OK", None])
+        assert first.exit_code == 1
+        # Re-run of just the Answer: the Model is not re-created, and the Answer binds to it.
+        client = MagicMock()
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = [{"response": {"status": {"status_code": "OK"},
+                                                "object": [{"header": {"id_guid": self.NEW_ANSWER}}]}}]
+        client.post.return_value = resp
+        with patch("ts_cli.commands.dependency.ThoughtSpotClient", return_value=client), \
+             patch("ts_cli.commands.dependency.resolve_profile", return_value="test"):
+            second = runner.invoke(app, ["dependency", "rollback", "--backup-dir", backup_dir,
+                                         "--profile", "test"])
+        assert second.exit_code == 0, _all_output(second)
+        out = json.loads(second.stdout)
+        assert [s["guid"] for s in out["skipped"]] == [self.MODEL]
+        assert client.post.call_count == 1
+        answer_tml = client.post.call_args.kwargs["json"]["metadata_tmls"][0]
+        assert f"fqn: {self.NEW_MODEL}" in answer_tml and self.MODEL not in answer_tml
+
 
 class _FakeResp:
     def __init__(self, *, ok=True, status_code=200, json_data=None, text=""):

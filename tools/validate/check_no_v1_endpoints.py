@@ -47,6 +47,13 @@ from pathlib import Path
 # (PR #666 review, B6).
 V1_MARKER = "/tspublic/v1"
 
+# The v1 /dependency family lives outside /tspublic/v1 (operation 8's
+# delete-with-dependents, and the purge call ts-dependency-cleanup refuses), so the
+# marker above cannot see it (PR #666 review). Not a blanket "/callosum/v1/": the
+# cohort-detail and AgentQL endpoints legitimately live under that prefix.
+V1_DEPENDENCY_MARKER = "/callosum/v1/dependency"
+V1_MARKERS = (V1_MARKER, V1_DEPENDENCY_MARKER)
+
 # v2 endpoints that were current when written but have since been superseded by a
 # newer v2 shape (2026-07 audit finding 13.1). Denylisting the bare/deprecated form
 # stops it from being reintroduced once every call site has migrated to the
@@ -73,7 +80,8 @@ SCAN_DIRS = ("tools", "agents", "scripts")
 EXCLUDE_DIRS = ("tools/validate",)
 
 
-# Files allowed to call v1, by exact path. Each entry names the documented exception in
+# Files allowed to call v1, by exact path. The exemption is the WHOLE file, not a list of
+# endpoints, so review every v1 string added to one by hand. Each entry names the documented exception in
 # `.claude/rules/ts-cli.md` it relies on; an entry without one is a bypass, not an
 # exception. Keep this list short — every entry is v1 code that 404s on newer builds.
 EXEMPT_FILES = {
@@ -114,7 +122,7 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
         source = path.read_text(encoding="utf-8")
     except OSError:
         return []
-    if V1_MARKER not in source and not any(ep in source for ep in DEPRECATED_V2_ENDPOINTS):
+    if not any(m in source for m in V1_MARKERS) and not any(ep in source for ep in DEPRECATED_V2_ENDPOINTS):
         return []  # fast path — nothing to parse
     try:
         tree = ast.parse(source, filename=str(path))
@@ -128,7 +136,7 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
             continue
         if id(node) in docstring_ids:
             continue
-        if V1_MARKER in node.value or any(ep in node.value for ep in DEPRECATED_V2_ENDPOINTS):
+        if any(m in node.value for m in V1_MARKERS) or any(ep in node.value for ep in DEPRECATED_V2_ENDPOINTS):
             hits.append((node.lineno, node.value.strip()[:80]))
     return hits
 
@@ -157,7 +165,7 @@ def main() -> int:
         scanned += 1
         for lineno, snippet in scan_file(path):
             rel = path.relative_to(root)
-            kind = "v1 endpoint" if V1_MARKER in snippet else "deprecated v2 endpoint"
+            kind = "v1 endpoint" if any(m in snippet for m in V1_MARKERS) else "deprecated v2 endpoint"
             failures.append(f"  ✗ {rel}:{lineno}: {kind} in code → {snippet!r}")
 
     if failures:

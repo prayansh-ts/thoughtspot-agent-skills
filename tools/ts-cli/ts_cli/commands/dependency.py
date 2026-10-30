@@ -29,12 +29,15 @@ from ts_cli.dependency.backup import (
     rollback_order,
 )
 from ts_cli.dependency.mutate import apply_remove, apply_repoint
-from ts_cli.tml_common import extract_imported_guid
+from ts_cli.tml_common import IMPORTED_STATUS_CODES, extract_imported_guid
 
 app = typer.Typer(help="ThoughtSpot dependency backup / mutate / rollback / apply-change (BL-083).")
 
 _profile_option = typer.Option(None, "--profile", "-p", envvar="TS_PROFILE",
                                help="Profile name (default: first profile or TS_PROFILE env var)")
+
+#: Written beside manifest.json by `rollback` after every entry, so a re-run resumes.
+ROLLBACK_STATE_FILE = "rollback_state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +444,8 @@ def _parse_import_status(resp) -> tuple:
 
     Normalizes the array-of-one vs bare-dict response shapes into a single
     `response_block` dict (the `"response"` key: `status` + `object`). `ok` is
-    True when `response_block["status"]["status_code"] == "OK"`.
+    True when the status code is in `IMPORTED_STATUS_CODES`: a `WARNING` (the
+    routine notice on a Model import) means the object WAS imported.
     """
     try:
         data = resp.json()
@@ -450,7 +454,7 @@ def _parse_import_status(resp) -> tuple:
     item = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
     response_block = item.get("response", {}) if isinstance(item, dict) else {}
     status = response_block.get("status", {})
-    ok = status.get("status_code") == "OK"
+    ok = status.get("status_code") in IMPORTED_STATUS_CODES
     return ok, response_block
 
 
@@ -463,9 +467,11 @@ def _rollback_one_entry(client: ThoughtSpotClient, entry: dict, results: Dict[st
     at its original GUID, so ThoughtSpot assigns a new one. Any other entry is
     updated in place (`create_new=False`) at its original GUID.
 
-    Every GUID already re-created earlier in this run (`results["new_guids"]`) is
-    substituted into the TML before import, so a dependent binds to the restored
-    object rather than to the deleted original (`remap_guids`).
+    Every GUID already re-created (`results["new_guids"]`, seeded from an earlier
+    run's state file) is substituted into the TML before import, so a dependent
+    binds to the restored object rather than to the deleted original
+    (`remap_guids`). An entry that still names a deleted object with no
+    replacement is refused rather than imported: it would bind to a dead GUID.
     """
     name = entry.get("name")
     backup_file = entry.get("backup_file")
@@ -486,6 +492,15 @@ def _rollback_one_entry(client: ThoughtSpotClient, entry: dict, results: Dict[st
 
     tml_yaml = _dump_tml_yaml(tml_dict, strip_guid=was_deleted, guid=entry.get("guid"))
     tml_yaml = remap_guids(tml_yaml, results["new_guids"])
+    own = entry.get("guid")
+    dangling = sorted(g for g in results["deleted_guids"]
+                      if g != own and g not in results["new_guids"] and g in tml_yaml)
+    if dangling:
+        err = ("references deleted object(s) not restored yet: " + ", ".join(dangling)
+               + " — restore those first; importing now would bind to a dead GUID")
+        results["failed"].append({"name": name, "guid": own, "error": err})
+        print(f"  ✗ Rollback refused: {name} — {err}", file=sys.stderr)
+        return
 
     resp = client.post(
         "/api/rest/2.0/metadata/tml/import",
@@ -496,20 +511,34 @@ def _rollback_one_entry(client: ThoughtSpotClient, entry: dict, results: Dict[st
         },
         raise_for_status=False,
     )
+    _record_import_outcome(resp, entry, was_deleted, results)
+
+
+def _record_import_outcome(resp, entry: dict, was_deleted: bool, results: Dict[str, object]) -> None:
+    """Record one rollback import's outcome into `results` (`succeeded`/`failed`/
+    `warnings`/`new_guids`). A `WARNING` status counts as restored."""
+    name, own = entry.get("name"), entry.get("guid")
     ok, response_block = _parse_import_status(resp)
+    status = response_block.get("status", {})
+    # A GUID that came back means the object exists, whatever the status says: record
+    # it so later entries bind to it and a re-run does not create it a second time.
+    new_guid = extract_imported_guid([{"response": response_block}]) if was_deleted else None
+    if new_guid:
+        results["new_guids"][own] = new_guid
 
     if ok:
-        new_guid = extract_imported_guid([{"response": response_block}])
-        label = name
-        if was_deleted and new_guid:
-            label = f"{name} (new GUID: {new_guid})"
-            results["new_guids"][entry.get("guid")] = new_guid
-        results["succeeded"].append({"guid": entry.get("guid"), "name": name, "label": label})
+        label = f"{name} (new GUID: {new_guid})" if new_guid else name
+        results["succeeded"].append({"guid": own, "name": name, "label": label})
+        if status.get("status_code") == "WARNING":
+            results["warnings"].append({"guid": own, "name": name,
+                                        "warning": status.get("error_message", "")})
         print(f"  ✓ Rolled back: {label}", file=sys.stderr)
     else:
-        status = response_block.get("status", {})
         err = status.get("error_message", "Unknown error")
-        results["failed"].append({"name": name, "guid": entry.get("guid"), "error": err})
+        failure = {"name": name, "guid": own, "error": err}
+        if new_guid:
+            failure["created_guid"] = new_guid
+        results["failed"].append(failure)
         print(f"  ✗ Rollback failed: {name} — {err}", file=sys.stderr)
 
 
@@ -528,7 +557,7 @@ def rollback_cmd(
     """Roll back a ts-dependency-manager mutation run from a Step-7 backup (SKILL.md Step 11).
 
     Reads `manifest.json` from `--backup-dir`, restores entries in `rollback_order`
-    (dependents before source). For an entry with `intent == "DELETE"`, re-imports
+    (the objects others reference first, so a dependent restores onto them). For an entry with `intent == "DELETE"`, re-imports
     the backed-up TML with `create_new=True` and the `guid:` line stripped — the
     object no longer exists at its original GUID, so ThoughtSpot assigns a new one.
     Any other entry is updated in place (`create_new=False`) at its original GUID.
@@ -536,8 +565,14 @@ def rollback_cmd(
     References between restored objects are carried over: each restored DELETE's new
     GUID is substituted into every later entry's TML before it is imported.
 
-    Output: `{"succeeded": [...], "failed": [...], "new_guids": {old_guid: new_guid}}`
-    to stdout. Per-object progress goes to stderr. `new_guids` lets the caller
+    Resumable: progress is written to `rollback_state.json` in `--backup-dir` after
+    every entry. A re-run skips each entry already restored (listed under
+    `skipped`) and seeds the GUID remap from the earlier run, so finishing a
+    partial restore neither duplicates objects nor loses the remap.
+
+    Output: `{"succeeded": [...], "failed": [...], "skipped": [...], "warnings":
+    [...], "new_guids": {old_guid: new_guid}}` to stdout. A `WARNING` import status
+    counts as restored and is listed under `warnings`. Per-object progress goes to stderr. `new_guids` lets the caller
     surface a GUID-remap table for any restored DELETE — objects OUTSIDE the backup
     that referenced the ORIGINAL guid remain broken and need manual reattachment.
 
@@ -575,14 +610,37 @@ def rollback_cmd(
     entries = [e for e in manifest.get("objects", []) if _wanted(e)]
     ordered = rollback_order(entries)
 
+    state_path = os.path.join(backup_dir, ROLLBACK_STATE_FILE)
+    state = {"new_guids": {}, "restored": []}
+    if os.path.isfile(state_path):
+        with open(state_path) as f:
+            state.update(json.load(f))
+
     resolved_profile = resolve_profile(profile)
     client = ThoughtSpotClient(resolved_profile)
 
-    results: Dict[str, object] = {"succeeded": [], "failed": [], "new_guids": {}}
+    results: Dict[str, object] = {
+        "succeeded": [], "failed": [], "skipped": [], "warnings": [],
+        "new_guids": dict(state["new_guids"]),
+        # Every deleted object in the manifest, not just the filtered entries: a
+        # `--guid` re-run must still refuse a reference to one not yet restored.
+        "deleted_guids": {e.get("guid") for e in manifest.get("objects", [])
+                          if e.get("intent") == "DELETE" and e.get("guid")},
+    }
+    restored = set(state["restored"])
 
     for entry in ordered:
+        if entry.get("guid") in restored:
+            results["skipped"].append({"guid": entry.get("guid"), "name": entry.get("name"),
+                                       "reason": "restored by an earlier run"})
+            print(f"  – Skipped: {entry.get('name')} — restored by an earlier run", file=sys.stderr)
+            continue
         _rollback_one_entry(client, entry, results)
+        restored.update(s["guid"] for s in results["succeeded"])
+        with open(state_path, "w") as f:
+            json.dump({"new_guids": results["new_guids"], "restored": sorted(restored)}, f, indent=2)
 
+    del results["deleted_guids"]
     print(json.dumps(results))
     if results["failed"]:
         print(f"  {len(results['failed'])} object(s) failed to restore — see 'failed'.",

@@ -43,7 +43,10 @@ migration hits the same issue.
   `/callosum/v1/tspublic/v1/{session,metadata,dependency}/*` and
   `/callosum/v1/dependency/delete-with-dependents`. The backup and rollback around the
   destructive call still go through `ts dependency backup` / `rollback`. The skill's
-  smoke test is the one entry in `EXEMPT_FILES` in `check_no_v1_endpoints.py`. **Exit:**
+  smoke test is the one entry in `EXEMPT_FILES` in `check_no_v1_endpoints.py` — the
+  exemption covers that whole file, not just these endpoints, so a v1 string added there
+  needs review by hand. The gate also matches `/callosum/v1/dependency`, so the family
+  is caught everywhere else. **Exit:**
   open item #6 in that skill — once a bearer token is verified against these endpoints,
   move them into a `ts dependency` subcommand, then remove this bullet and the exemption.
 
