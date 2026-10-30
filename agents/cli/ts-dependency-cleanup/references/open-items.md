@@ -522,7 +522,7 @@ form with no `source` (or a `DELETE_SOURCE` intent).
 ## #20 — Rollback of an operation 8 cascade — OPEN (defects fixed in code; live run pending)
 
 The review (B3) found four defects in the restore path. All four are now fixed in
-ts-cli 0.187.0 and covered by unit tests (`tests/test_dependency_command.py`
+ts-cli 0.191.0 and covered by unit tests (`tests/test_dependency_command.py`
 `TestCascadeDeleteRollback`, `tests/test_dependency_backup.py`):
 
 | Defect | Fix |

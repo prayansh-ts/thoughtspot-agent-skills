@@ -101,9 +101,9 @@ section and the validator exemption.
 - A ThoughtSpot profile for the target cluster — run `/ts-profile-thoughtspot` if none exists
 - The profile's credential env var must be set in the calling shell
 - The user must have **MODIFY** or **FULL** access on any object touched by operation 8
-- The `ts` CLI **v0.187.0 or later** (`pip install -e tools/ts-cli`) with the **same
+- The `ts` CLI **v0.191.0 or later** (`pip install -e tools/ts-cli`) with the **same
   profile**. Operation 8's backup and rollback run through `ts dependency backup` /
-  `ts dependency rollback`. 0.187.0 is the release whose rollback carries new GUIDs into
+  `ts dependency rollback`. 0.191.0 is the release whose rollback carries new GUIDs into
   the restored dependents, restores SQL Views first, and exits non-zero on a failed
   restore. Check with `ts --version`; an older CLI → stop and ask the user to upgrade.
 
